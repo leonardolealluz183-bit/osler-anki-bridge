@@ -141,6 +141,16 @@ test('sanitizes useful HTML while removing scripts and dangerous attributes', ()
   assert.doesNotMatch(sanitized, /javascript:/i);
 });
 
+test('removes temporary authorization tokens from image URLs', () => {
+  global.location = { origin: 'https://oslermedicina.com.br' };
+  assert.equal(
+    bridge.scrubSensitiveUrl('/api/images/content/card.png?token=secret&width=800'),
+    '/api/images/content/card.png?width=800',
+  );
+  const sanitized = bridge.sanitizeHtml('<img src="/api/images/content/card.png?token=secret">', fakeDocument());
+  assert.doesNotMatch(sanitized, /token=|secret/);
+});
+
 test('extracts topic from first strong and removes terminal punctuation', () => {
   const card = bridge.extractOslerCard(makeCardDocument({
     topic: 'Fisiologia Renal.',
@@ -218,10 +228,25 @@ test('does not depend on styled-components dynamic classes', () => {
   assert.deepEqual(first.answer.text, second.answer.text);
 });
 
-test('detects Errei and Difícil by visible text and ignores Acertei', () => {
-  assert.equal(bridge.triggerForButton({ textContent: ' Errei ' }), 'botão Errei');
-  assert.equal(bridge.triggerForButton({ textContent: 'DIFÍCIL 12 min' }), 'botão Difícil');
-  assert.equal(bridge.triggerForButton({ textContent: 'Acertei' }), null);
+test('detects Errei and Difícil from nested button content and ignores Acertei', () => {
+  function button(text) {
+    const node = {
+      tagName: 'BUTTON',
+      textContent: text,
+      parentElement: null,
+      getAttribute() { return null; },
+      closest() { return node; },
+    };
+    return node;
+  }
+  const wrong = button(' Errei ');
+  const hard = button('DIFÍCIL 12 min');
+  const correct = button('Acertei');
+  const nestedWrong = { closest() { return wrong; } };
+
+  assert.equal(bridge.triggerForButton(bridge.findActionElement(nestedWrong)), 'botão Errei');
+  assert.equal(bridge.triggerForButton(hard), 'botão Difícil');
+  assert.equal(bridge.triggerForButton(correct), null);
 });
 
 test('captures an automatic card once and ignores duplicates', () => {
@@ -239,7 +264,7 @@ test('captures an automatic card once and ignores duplicates', () => {
 
 test('userscript header targets Osler and provides update URLs without localhost', () => {
   const source = fs.readFileSync(path.join(__dirname, '../userscript/osler-anki-bridge.user.js'), 'utf8');
-  assert.match(source, /@version\s+0\.3\.1/);
+  assert.match(source, /@version\s+0\.3\.2/);
   assert.match(source, /@match\s+https:\/\/oslermedicina\.com\.br\/\*/);
   assert.match(source, /@match\s+https:\/\/\*\.oslermedicina\.com\.br\/\*/);
   assert.match(source, /@updateURL\s+https:\/\/leonardolealluz183-bit\.github\.io\/osler-anki-bridge\/osler-anki-bridge\.user\.js/);
