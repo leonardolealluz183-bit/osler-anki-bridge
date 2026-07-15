@@ -1,8 +1,8 @@
 {
   "name": "osler-anki-bridge",
-  "version": "0.3.4",
+  "version": "0.4.0",
   "private": true,
-  "description": "Phase 1 automatic capture diagnostics for Osler pages.",
+  "description": "Captura cards da Osler e exporta uma fila persistente em TSV para o AnkiDroid.",
   "scripts": {
     "test": "node --test",
     "lint": "node --check userscript/osler-anki-bridge.user.js && node --check docs/osler-anki-bridge.user.js && node --check tests/osler-anki-bridge.test.js"
