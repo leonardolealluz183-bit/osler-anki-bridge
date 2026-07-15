@@ -110,3 +110,25 @@ test('public API contains no AnkiDroid, intent, platform blocking, or network se
   const apiNames = Object.keys(bridge).join(' ');
   assert.doesNotMatch(apiNames, /anki|intent|android|send|fetch/i);
 });
+
+
+test('userscript header targets the real Osler Medicina domain only', () => {
+  const source = require('node:fs').readFileSync(require('node:path').join(__dirname, '../userscript/osler-anki-bridge.user.js'), 'utf8');
+
+  assert.match(source, /@match\s+https:\/\/oslermedicina\.com\.br\/\*/);
+  assert.match(source, /@match\s+https:\/\/\*\.oslermedicina\.com\.br\/\*/);
+  assert.doesNotMatch(source, /osler\.app|osler\.com/);
+});
+
+test('GitHub Pages artifact includes demo index and installable userscript', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/pages.yml'), 'utf8');
+  const demo = fs.readFileSync(path.join(__dirname, '../demo/index.html'), 'utf8');
+
+  assert.match(workflow, /mkdir -p _site/);
+  assert.match(workflow, /cp demo\/index\.html _site\/index\.html/);
+  assert.match(workflow, /cp userscript\/osler-anki-bridge\.user\.js _site\/osler-anki-bridge\.user\.js/);
+  assert.match(workflow, /path: _site/);
+  assert.match(demo, /\.\/osler-anki-bridge\.user\.js/);
+});

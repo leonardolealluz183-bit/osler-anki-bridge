@@ -3,8 +3,8 @@
 // @namespace    https://github.com/osler-anki-bridge/osler-anki-bridge
 // @version      0.2.0
 // @description  Phase 1 capture and diagnostics userscript for Osler cards. No network, AnkiDroid, or app integration.
-// @match        https://*.osler.app/*
-// @match        https://*.osler.com/*
+// @match        https://oslermedicina.com.br/*
+// @match        https://*.oslermedicina.com.br/*
 // @match        http://localhost:*/*
 // @grant        none
 // @run-at       document-idle

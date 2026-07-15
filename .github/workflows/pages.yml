@@ -25,10 +25,15 @@ jobs:
         uses: actions/checkout@v4
       - name: Setup Pages
         uses: actions/configure-pages@v5
-      - name: Upload demo artifact
+      - name: Build Pages site
+        run: |
+          mkdir -p _site
+          cp demo/index.html _site/index.html
+          cp userscript/osler-anki-bridge.user.js _site/osler-anki-bridge.user.js
+      - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: demo
+          path: _site
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
