@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Osler Capture Diagnostics
 // @namespace    https://github.com/osler-anki-bridge/osler-anki-bridge
-// @version      0.3.2
+// @version      0.3.3
 // @description  Phase 1 automatic capture diagnostics for Osler cards. No network, AnkiDroid, or app integration.
 // @match        https://oslermedicina.com.br/*
 // @match        https://*.oslermedicina.com.br/*
@@ -380,9 +380,9 @@
 
   function triggerForButton(element) {
     const text = normalizeButtonText(element?.textContent);
-    if (/(^|\s)acertei(\s|$)/.test(text)) return null;
-    if (/(^|\s)errei(\s|$)/.test(text)) return 'botão Errei';
-    if (/(^|\s)dificil(\s|$)/.test(text)) return 'botão Difícil';
+    if (text.includes('acertei')) return null;
+    if (text.includes('errei')) return 'botão Errei';
+    if (text.includes('dificil')) return 'botão Difícil';
     return null;
   }
 
