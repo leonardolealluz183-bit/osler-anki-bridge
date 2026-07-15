@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Osler Capture Diagnostics
+// @name         Osler Anki Bridge
 // @namespace    https://github.com/osler-anki-bridge/osler-anki-bridge
-// @version      0.3.4
-// @description  Phase 1 automatic capture diagnostics for Osler cards. No network, AnkiDroid, or app integration.
+// @version      0.4.0
+// @description  Captura cards da Osler e exporta a fila em TSV para importação em lote no AnkiDroid.
 // @match        https://oslermedicina.com.br/*
 // @match        https://*.oslermedicina.com.br/*
 // @updateURL    https://leonardolealluz183-bit.github.io/osler-anki-bridge/osler-anki-bridge.user.js
@@ -14,7 +14,9 @@
 (function bootstrap(global) {
   'use strict';
 
-  const STORAGE_KEY = 'oslerCaptureDiagnostics.config.v2';
+  const CONFIG_KEY = 'oslerCaptureDiagnostics.config.v2';
+  const QUEUE_KEY = 'oslerAnkiBridge.queue.v1';
+  const EXPORT_DECK = 'Osler';
   const FIELD_LABELS = {
     question: 'pergunta',
     answer: 'resposta',
@@ -58,25 +60,57 @@
     return entry;
   }
 
-  function loadConfig(storage = global.localStorage) {
+  function parseStoredJson(storage, key, fallback) {
     try {
-      return JSON.parse(storage?.getItem(STORAGE_KEY) || '{}');
+      const parsed = JSON.parse(storage?.getItem?.(key) || 'null');
+      return parsed ?? fallback;
     } catch (_error) {
-      return {};
+      return fallback;
     }
+  }
+
+  function loadConfig(storage = global.localStorage) {
+    const loaded = parseStoredJson(storage, CONFIG_KEY, {});
+    return loaded && typeof loaded === 'object' && !Array.isArray(loaded) ? loaded : {};
   }
 
   function saveConfig(nextConfig = config, storage = global.localStorage) {
     config = { ...nextConfig };
-    storage?.setItem(STORAGE_KEY, JSON.stringify(config));
+    storage?.setItem?.(CONFIG_KEY, JSON.stringify(config));
     renderPanel();
   }
 
   function clearCalibration(storage = global.localStorage) {
     config = {};
-    storage?.removeItem?.(STORAGE_KEY);
-    renderPanel();
+    storage?.removeItem?.(CONFIG_KEY);
     log('calibração limpa');
+  }
+
+  function loadQueue(storage = global.localStorage) {
+    const loaded = parseStoredJson(storage, QUEUE_KEY, []);
+    if (!Array.isArray(loaded)) return [];
+    const unique = [];
+    const ids = new Set();
+    loaded.forEach((card) => {
+      if (!card?.id || ids.has(card.id)) return;
+      ids.add(card.id);
+      unique.push(card);
+    });
+    return unique;
+  }
+
+  function saveQueue(queue = capturedCards, storage = global.localStorage) {
+    capturedCards = Array.isArray(queue) ? [...queue] : [];
+    storage?.setItem?.(QUEUE_KEY, JSON.stringify(capturedCards));
+    renderPanel();
+    return capturedCards;
+  }
+
+  function clearQueue(storage = global.localStorage) {
+    capturedCards = [];
+    storage?.removeItem?.(QUEUE_KEY);
+    log('fila limpa');
+    return capturedCards;
   }
 
   function cssEscape(value) {
@@ -120,9 +154,7 @@
         if (SENSITIVE_QUERY_PARAM.test(key)) parsed.searchParams.delete(key);
       });
       const isRelative = !/^[a-z][a-z0-9+.-]*:/i.test(original) && !original.startsWith('//');
-      return isRelative
-        ? `${parsed.pathname}${parsed.search}${parsed.hash}`
-        : parsed.toString();
+      return isRelative ? `${parsed.pathname}${parsed.search}${parsed.hash}` : parsed.toString();
     } catch (_error) {
       return original
         .replace(/([?&])(token|access_token|auth|authorization|signature|sig|key|jwt)=[^&"'\s>]*/gi, '$1')
@@ -132,10 +164,7 @@
 
   function sanitizeHtml(html, documentRef = global.document) {
     const template = documentRef?.createElement?.('template');
-    if (!template) return String(html || '').trim();
-    template.innerHTML = html || '';
-
-    if (!template.content?.querySelectorAll) {
+    if (!template) {
       return String(html || '')
         .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
         .replace(/\s+on[a-z]+=(("[^"]*")|('[^']*')|[^\s>]+)/gi, '')
@@ -144,6 +173,9 @@
         .replace(/[?&]+(?=["'\s>])/g, '')
         .trim();
     }
+
+    template.innerHTML = html || '';
+    if (!template.content?.querySelectorAll) return String(template.innerHTML || '').trim();
 
     template.content.querySelectorAll('script, iframe, object, embed, link[rel="import"]').forEach((node) => node.remove());
     template.content.querySelectorAll('*').forEach((node) => {
@@ -157,6 +189,38 @@
         if (!sanitized) node.removeAttribute(attr.name);
         else node.setAttribute(attr.name, sanitized);
       });
+    });
+    return template.innerHTML.trim();
+  }
+
+  function escapeHtml(value) {
+    return String(value || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function prepareHtmlForAnki(html, documentRef = global.document) {
+    const sanitized = sanitizeHtml(html, documentRef);
+    const template = documentRef?.createElement?.('template');
+    if (!template) {
+      return sanitized
+        .replace(/<button\b[^>]*>[\s\S]*?<\/button>/gi, '')
+        .replace(/<svg\b[^>]*>[\s\S]*?<\/svg>/gi, '')
+        .replace(/<img\b[^>]*>/gi, '<div><em>[Imagem disponível na Osler]</em></div>')
+        .trim();
+    }
+
+    template.innerHTML = sanitized;
+    if (!template.content?.querySelectorAll) return sanitized;
+    template.content.querySelectorAll('button, svg').forEach((node) => node.remove());
+    template.content.querySelectorAll('img').forEach((image) => {
+      const placeholder = documentRef.createElement('div');
+      const alt = normalizeWhitespace(image.getAttribute?.('alt'));
+      placeholder.innerHTML = `<em>[Imagem disponível na Osler${alt ? `: ${escapeHtml(alt)}` : ''}]</em>`;
+      image.replaceWith(placeholder);
     });
     return template.innerHTML.trim();
   }
@@ -254,9 +318,7 @@
     const itemElements = [];
     containers.forEach((container) => {
       const tag = String(container.tagName || '').toLowerCase();
-      const listItems = tag === 'li'
-        ? [container]
-        : Array.from(container.querySelectorAll?.('li') || []);
+      const listItems = tag === 'li' ? [container] : Array.from(container.querySelectorAll?.('li') || []);
       if (listItems.length) itemElements.push(...listItems);
       else itemElements.push(container);
     });
@@ -322,11 +384,7 @@
   function extractFallbackCard(documentRef = global.document) {
     const question = readField(config.question, documentRef);
     return {
-      question: {
-        ...question,
-        revealedText: question.text,
-        revealedHtml: question.html,
-      },
+      question: { ...question, revealedText: question.text, revealedHtml: question.html },
       answer: { ...readField(config.answer, documentRef), source: 'manual-fallback', items: [] },
       explanation: readField(config.explanation, documentRef),
       topic: readField(config.deck, documentRef),
@@ -352,7 +410,7 @@
     ].join('\n---\n'));
   }
 
-  function captureCard(trigger, documentRef = global.document) {
+  function captureCard(trigger, documentRef = global.document, storage = global.localStorage) {
     const extracted = extractOslerCard(documentRef) || extractFallbackCard(documentRef);
     const card = {
       id: '',
@@ -373,8 +431,8 @@
     }
 
     capturedCards.push(card);
-    log('card capturado', { id: card.id, trigger });
-    renderPanel();
+    saveQueue(capturedCards, storage);
+    log('card adicionado à fila', { id: card.id, trigger, queueSize: capturedCards.length });
     return card;
   }
 
@@ -396,12 +454,8 @@
     const button = target?.closest?.('button,[role="button"]') || null;
     if (!button) return null;
 
-    if (button.matches?.('[data-osler-capture-bound="wrongButton"]')) return 'botão Errei';
-    if (button.matches?.('[data-osler-capture-bound="hardButton"]')) return 'botão Difícil';
-
     const group = button.closest?.('[class*="ButtonsContainer"]');
     if (!group?.querySelectorAll) return null;
-
     const buttons = Array.from(group.querySelectorAll('button,[role="button"]')).filter((candidate) => {
       const className = String(candidate.className || '');
       return className.includes('SRSButton') || Boolean(candidate.closest?.('[class*="MetacognitionContainer"]'));
@@ -415,7 +469,6 @@
   function findActionElement(target) {
     const closest = target?.closest?.('button,[role="button"]');
     if (closest && (triggerForButton(closest) || triggerFromOslerStructure(closest))) return closest;
-
     let current = target;
     for (let depth = 0; current && depth < 8; depth += 1) {
       if (triggerForButton(current) || triggerFromOslerStructure(current)) return current;
@@ -430,24 +483,18 @@
       if (event.type !== 'click') return null;
       event.preventDefault?.();
       event.stopPropagation?.();
-      finishCalibration(event.target, documentRef);
+      finishCalibration(event.target);
       return 'calibration';
     }
 
     const path = event.composedPath?.() || [];
-    let actionElement = null;
     let trigger = null;
-
     for (const node of path) {
       trigger = triggerForButton(node) || triggerFromOslerStructure(node);
-      if (trigger) {
-        actionElement = node;
-        break;
-      }
+      if (trigger) break;
     }
-
     if (!trigger) {
-      actionElement = findActionElement(event.target);
+      const actionElement = findActionElement(event.target);
       trigger = triggerForButton(actionElement) || triggerFromOslerStructure(actionElement);
     }
     if (!trigger) return null;
@@ -458,16 +505,12 @@
     return captureCard(trigger, documentRef);
   }
 
-  function handleDocumentClick(event, documentRef = global.document) {
-    return handleDocumentAction(event, documentRef);
-  }
-
   function startCalibration(field) {
     calibrationField = field;
     log('calibração iniciada', { field });
   }
 
-  function finishCalibration(element, documentRef = global.document) {
+  function finishCalibration(element) {
     if (!calibrationField || !element || panelRefs?.root?.contains?.(element)) return false;
     const selector = selectorFor(element);
     saveConfig({ ...config, [calibrationField]: selector });
@@ -485,8 +528,90 @@
     return true;
   }
 
-  function installDocumentListener(documentRef = global.document) {
-    return installDocumentListeners(documentRef);
+  function normalizeTag(value) {
+    return normalizeButtonText(value)
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .slice(0, 80);
+  }
+
+  function tsvField(value) {
+    const normalized = String(value ?? '')
+      .replace(/\r?\n/g, '<br>')
+      .replace(/\t/g, ' ');
+    return `"${normalized.replace(/"/g, '""')}"`;
+  }
+
+  function cardToAnkiRow(card, documentRef = global.document) {
+    const question = prepareHtmlForAnki(card.question?.html || escapeHtml(card.question?.text), documentRef);
+    const answer = prepareHtmlForAnki(card.answer?.html || escapeHtml(card.answer?.text), documentRef);
+    const explanation = prepareHtmlForAnki(card.explanation?.html || escapeHtml(card.explanation?.text), documentRef);
+    const topic = normalizeWhitespace(card.topic?.text || card.deck?.text || 'Osler');
+    const source = scrubSensitiveUrl(card.url || 'https://oslermedicina.com.br/test');
+    const front = `<span style="display:none">osler:${escapeHtml(card.id)}</span>${question}`;
+    const back = [
+      answer ? `<div class="osler-answer"><strong>Resposta</strong><br>${answer}</div>` : '',
+      explanation ? `<hr><div class="osler-explanation"><strong>Explicação</strong><br>${explanation}</div>` : '',
+      `<hr><div class="osler-meta"><small>Assunto: ${escapeHtml(topic)} · ID: ${escapeHtml(card.id)} · <a href="${escapeHtml(source)}">Osler</a></small></div>`,
+    ].filter(Boolean).join('');
+    const tags = ['osler', normalizeTag(topic)].filter(Boolean).join(' ');
+    return [front, back, tags, EXPORT_DECK].map(tsvField).join('\t');
+  }
+
+  function buildAnkiTsv(cards = capturedCards, documentRef = global.document) {
+    const rows = cards.map((card) => cardToAnkiRow(card, documentRef));
+    const headers = [
+      '#separator:Tab',
+      '#html:true',
+      '#tags:osler',
+      '#columns:Frente\tVerso\tTags\tBaralho',
+      '#tags column:3',
+      '#deck column:4',
+    ];
+    return `\uFEFF${[...headers, ...rows].join('\n')}\n`;
+  }
+
+  function exportFilename(date = new Date()) {
+    const pad = (value) => String(value).padStart(2, '0');
+    return `osler-anki-${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}.tsv`;
+  }
+
+  function createExportFile(cards = capturedCards, documentRef = global.document) {
+    if (!cards.length) throw new Error('A fila está vazia.');
+    const contents = buildAnkiTsv(cards, documentRef);
+    return new File([contents], exportFilename(), { type: 'text/tab-separated-values;charset=utf-8' });
+  }
+
+  function downloadExport(cards = capturedCards, documentRef = global.document) {
+    const file = createExportFile(cards, documentRef);
+    const url = global.URL.createObjectURL(file);
+    const anchor = documentRef.createElement('a');
+    anchor.href = url;
+    anchor.download = file.name;
+    anchor.style.display = 'none';
+    documentRef.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    global.setTimeout?.(() => global.URL.revokeObjectURL(url), 1000);
+    log('arquivo TSV baixado', { filename: file.name, cards: cards.length });
+    return file;
+  }
+
+  async function shareExport(cards = capturedCards, documentRef = global.document, navigatorRef = global.navigator) {
+    const file = createExportFile(cards, documentRef);
+    const shareData = { title: 'Cards da Osler para o AnkiDroid', files: [file] };
+    const canShareFiles = typeof navigatorRef?.share === 'function'
+      && (typeof navigatorRef.canShare !== 'function' || navigatorRef.canShare(shareData));
+
+    if (!canShareFiles) {
+      downloadExport(cards, documentRef);
+      log('compartilhamento de arquivo indisponível; TSV baixado como alternativa');
+      return { mode: 'download', file };
+    }
+
+    await navigatorRef.share(shareData);
+    log('TSV enviado ao compartilhamento do Android', { filename: file.name, cards: cards.length });
+    return { mode: 'share', file };
   }
 
   function copyText(text) {
@@ -501,7 +626,7 @@
   }
 
   function panelJson() {
-    return JSON.stringify({ config, capturedCards }, null, 2);
+    return JSON.stringify({ config, queue: capturedCards }, null, 2);
   }
 
   function logsJson() {
@@ -513,25 +638,34 @@
     panelRefs.output.textContent = panelJson();
     panelRefs.status.textContent = calibrationField
       ? `Toque no elemento de ${FIELD_LABELS[calibrationField]}`
-      : `${capturedCards.length} card(s) capturado(s) — extração automática ativa`;
+      : `${capturedCards.length} card(s) na fila para o AnkiDroid`;
+    panelRefs.send.disabled = capturedCards.length === 0;
+    panelRefs.download.disabled = capturedCards.length === 0;
+    panelRefs.clear.disabled = capturedCards.length === 0;
   }
 
   function createPanel(documentRef = global.document) {
     const root = documentRef.createElement('section');
     root.id = 'osler-capture-diagnostics';
     root.innerHTML = `
-      <strong>Osler Capture Diagnostics — Fase 1</strong>
+      <strong>Osler Anki Bridge — Fase 2</strong>
       <p data-role="status"></p>
+      <button type="button" data-action="send-anki">Enviar ao AnkiDroid</button>
+      <button type="button" data-action="download-tsv">Baixar TSV</button>
+      <button type="button" data-action="clear-queue">Limpar fila</button>
       <details>
-        <summary>Calibração manual (fallback)</summary>
+        <summary>Diagnóstico e fallback</summary>
         <div data-role="calibration"></div>
         <button type="button" data-action="clear-calibration">Limpar calibração</button>
+        <button type="button" data-action="copy-json">Copiar JSON</button>
+        <button type="button" data-action="copy-logs">Copiar logs</button>
+        <pre data-role="output"></pre>
       </details>
-      <button type="button" data-action="copy-json">Copiar JSON</button>
-      <button type="button" data-action="copy-logs">Copiar logs</button>
-      <pre data-role="output"></pre>
     `;
-    root.style.cssText = 'position:fixed;right:12px;bottom:12px;z-index:2147483647;max-width:420px;max-height:70vh;overflow:auto;background:#fff;color:#111;border:1px solid #999;border-radius:12px;padding:12px;font:12px system-ui,sans-serif;box-shadow:0 6px 20px rgba(0,0,0,.25)';
+    root.style.cssText = 'position:fixed;right:12px;bottom:12px;z-index:2147483647;max-width:430px;max-height:72vh;overflow:auto;background:#fff;color:#111;border:1px solid #999;border-radius:12px;padding:12px;font:12px system-ui,sans-serif;box-shadow:0 6px 20px rgba(0,0,0,.25)';
+    root.querySelectorAll('button').forEach((button) => {
+      button.style.cssText = 'margin:3px;padding:7px 9px;';
+    });
 
     const calibration = root.querySelector('[data-role="calibration"]');
     FIELD_ORDER.forEach((field) => {
@@ -540,6 +674,17 @@
       button.textContent = `Calibrar ${FIELD_LABELS[field]}`;
       button.addEventListener('click', () => startCalibration(field));
       calibration.appendChild(button);
+    });
+
+    root.querySelector('[data-action="send-anki"]').addEventListener('click', () => {
+      shareExport().catch((error) => log('falha ao enviar TSV', { error: String(error?.message || error) }));
+    });
+    root.querySelector('[data-action="download-tsv"]').addEventListener('click', () => {
+      try { downloadExport(); } catch (error) { log('falha ao baixar TSV', { error: String(error?.message || error) }); }
+    });
+    root.querySelector('[data-action="clear-queue"]').addEventListener('click', () => {
+      const confirmed = typeof global.confirm !== 'function' || global.confirm('Limpar todos os cards da fila?');
+      if (confirmed) clearQueue();
     });
     root.querySelector('[data-action="clear-calibration"]').addEventListener('click', () => clearCalibration());
     root.querySelector('[data-action="copy-json"]').addEventListener('click', () => copyText(panelJson()).then(() => log('JSON copiado')));
@@ -550,25 +695,36 @@
   function install(documentRef = global.document) {
     if (!documentRef?.body || documentRef.getElementById('osler-capture-diagnostics')) return null;
     config = loadConfig();
+    capturedCards = loadQueue();
     const root = createPanel(documentRef);
     documentRef.body.appendChild(root);
     panelRefs = {
       root,
       output: root.querySelector('[data-role="output"]'),
       status: root.querySelector('[data-role="status"]'),
+      send: root.querySelector('[data-action="send-anki"]'),
+      download: root.querySelector('[data-action="download-tsv"]'),
+      clear: root.querySelector('[data-action="clear-queue"]'),
     };
     installDocumentListeners(documentRef);
     renderPanel();
-    log('userscript instalado: extração automática ativa, sem integrações externas');
+    log('fase 2 instalada: fila persistente e exportação TSV ativas');
     return root;
   }
 
   const api = {
+    buildAnkiTsv,
     buildStableId,
     captureCard,
+    cardToAnkiRow,
     clearCalibration,
+    clearQueue,
+    createExportFile,
     createPanel,
+    downloadExport,
     elementsBetween,
+    escapeHtml,
+    exportFilename,
     extractAnswers,
     extractIntermediateAnswer,
     extractOslerCard,
@@ -577,27 +733,32 @@
     findQuestionElement,
     finishCalibration,
     handleDocumentAction,
-    handleDocumentClick,
     install,
-    installDocumentListener,
     installDocumentListeners,
     loadConfig,
+    loadQueue,
     logsJson,
     normalizeButtonText,
+    normalizeTag,
     panelJson,
+    prepareHtmlForAnki,
     readField,
     replaceClozesWithPlaceholders,
     sanitizeHtml,
     saveConfig,
+    saveQueue,
     scrubSensitiveUrl,
     selectorFor,
+    shareExport,
     stableHash,
     startCalibration,
     stripTopicPunctuation,
     triggerForButton,
     triggerFromOslerStructure,
+    tsvField,
   };
   global.OslerCaptureDiagnostics = api;
+  global.OslerAnkiBridge = api;
 
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = api;
