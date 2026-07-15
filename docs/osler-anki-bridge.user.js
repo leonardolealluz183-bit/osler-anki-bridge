@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Osler Capture Diagnostics
 // @namespace    https://github.com/osler-anki-bridge/osler-anki-bridge
-// @version      0.3.3
+// @version      0.3.4
 // @description  Phase 1 automatic capture diagnostics for Osler cards. No network, AnkiDroid, or app integration.
 // @match        https://oslermedicina.com.br/*
 // @match        https://*.oslermedicina.com.br/*
@@ -379,22 +379,46 @@
   }
 
   function triggerForButton(element) {
-    const text = normalizeButtonText(element?.textContent);
+    const text = normalizeButtonText([
+      element?.textContent,
+      element?.innerText,
+      element?.getAttribute?.('aria-label'),
+      element?.getAttribute?.('title'),
+      element?.getAttribute?.('value'),
+    ].filter(Boolean).join(' '));
     if (text.includes('acertei')) return null;
     if (text.includes('errei')) return 'botão Errei';
     if (text.includes('dificil')) return 'botão Difícil';
     return null;
   }
 
+  function triggerFromOslerStructure(target) {
+    const button = target?.closest?.('button,[role="button"]') || null;
+    if (!button) return null;
+
+    if (button.matches?.('[data-osler-capture-bound="wrongButton"]')) return 'botão Errei';
+    if (button.matches?.('[data-osler-capture-bound="hardButton"]')) return 'botão Difícil';
+
+    const group = button.closest?.('[class*="ButtonsContainer"]');
+    if (!group?.querySelectorAll) return null;
+
+    const buttons = Array.from(group.querySelectorAll('button,[role="button"]')).filter((candidate) => {
+      const className = String(candidate.className || '');
+      return className.includes('SRSButton') || Boolean(candidate.closest?.('[class*="MetacognitionContainer"]'));
+    });
+    const index = buttons.indexOf(button);
+    if (index === 0) return 'botão Errei';
+    if (index === 1) return 'botão Difícil';
+    return null;
+  }
+
   function findActionElement(target) {
     const closest = target?.closest?.('button,[role="button"]');
-    if (closest && triggerForButton(closest)) return closest;
+    if (closest && (triggerForButton(closest) || triggerFromOslerStructure(closest))) return closest;
 
     let current = target;
-    for (let depth = 0; current && depth < 5; depth += 1) {
-      const tag = String(current.tagName || '').toLowerCase();
-      const role = current.getAttribute?.('role');
-      if ((tag === 'button' || role === 'button') && triggerForButton(current)) return current;
+    for (let depth = 0; current && depth < 8; depth += 1) {
+      if (triggerForButton(current) || triggerFromOslerStructure(current)) return current;
       current = current.parentElement;
     }
     return null;
@@ -410,8 +434,22 @@
       return 'calibration';
     }
 
-    const actionElement = findActionElement(event.target);
-    const trigger = triggerForButton(actionElement);
+    const path = event.composedPath?.() || [];
+    let actionElement = null;
+    let trigger = null;
+
+    for (const node of path) {
+      trigger = triggerForButton(node) || triggerFromOslerStructure(node);
+      if (trigger) {
+        actionElement = node;
+        break;
+      }
+    }
+
+    if (!trigger) {
+      actionElement = findActionElement(event.target);
+      trigger = triggerForButton(actionElement) || triggerFromOslerStructure(actionElement);
+    }
     if (!trigger) return null;
 
     const timestamp = Date.now();
@@ -440,6 +478,7 @@
 
   function installDocumentListeners(documentRef = global.document) {
     if (documentListenersInstalled || !documentRef?.addEventListener) return false;
+    documentRef.addEventListener('touchstart', (event) => handleDocumentAction(event, documentRef), true);
     documentRef.addEventListener('pointerdown', (event) => handleDocumentAction(event, documentRef), true);
     documentRef.addEventListener('click', (event) => handleDocumentAction(event, documentRef), true);
     documentListenersInstalled = true;
@@ -556,6 +595,7 @@
     startCalibration,
     stripTopicPunctuation,
     triggerForButton,
+    triggerFromOslerStructure,
   };
   global.OslerCaptureDiagnostics = api;
 
