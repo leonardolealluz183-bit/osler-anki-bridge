@@ -6,6 +6,11 @@ const path = require('node:path');
 global.Node = { DOCUMENT_POSITION_FOLLOWING: 4 };
 global.innerWidth = 1600;
 global.innerHeight = 900;
+global.location = {
+  pathname: '/test',
+  href: 'https://oslermedicina.com.br/test',
+  origin: 'https://oslermedicina.com.br',
+};
 
 const bridge = require('../userscript/osler-anki-bridge.user.js');
 const noDom = { createElement() { return null; } };
@@ -159,7 +164,16 @@ function bodyClozeDocument(answer) {
   return documentRef;
 }
 
+test('page modes separate capture from the heavy report screen', () => {
+  assert.equal(bridge.pageMode({ pathname: '/test' }), 'test');
+  assert.equal(bridge.pageMode({ pathname: '/test/' }), 'test');
+  assert.equal(bridge.pageMode({ pathname: '/test/report' }), 'report');
+  assert.equal(bridge.pageMode({ pathname: '/test/report/' }), 'report');
+  assert.equal(bridge.pageMode({ pathname: '/dashboard' }), 'idle');
+});
+
 test('extracts list answer when the card has no explanation block', () => {
+  global.location.pathname = '/test';
   const { documentRef, question } = noExplanationCardDocument();
   global.document = documentRef;
   const card = bridge.extractCard(documentRef);
@@ -172,6 +186,7 @@ test('extracts list answer when the card has no explanation block', () => {
 });
 
 test('body clozes create distinct cards for the same stem', () => {
+  global.location.pathname = '/test';
   const firstDocument = bodyClozeDocument('Fumou há menos de 30 minutos');
   global.document = firstDocument;
   const first = bridge.extractCard(firstDocument);
@@ -185,6 +200,15 @@ test('body clozes create distinct cards for the same stem', () => {
   assert.match(first.question.text, /\[\.\.\.\]/);
   assert.notEqual(first.answer.text, second.answer.text);
   assert.notEqual(first.id, second.id);
+});
+
+test('does not scan for cards on the report page', () => {
+  global.location.pathname = '/test/report';
+  const documentRef = {
+    querySelectorAll() { throw new Error('report page must not be scanned'); },
+  };
+  assert.equal(bridge.extractCard(documentRef), null);
+  global.location.pathname = '/test';
 });
 
 test('keyboard shortcuts map 1 to Errei and 2 to Difícil', () => {
@@ -215,11 +239,12 @@ test('rejects verdict-only cards without answers', () => {
   assert.equal(result.valid, false);
 });
 
-test('source and published copy are identical at v0.4.4', () => {
+test('source and published copy are identical at v0.4.5', () => {
   const source = fs.readFileSync(path.join(__dirname, '../userscript/osler-anki-bridge.user.js'), 'utf8');
   const published = fs.readFileSync(path.join(__dirname, '../docs/osler-anki-bridge.user.js'), 'utf8');
   assert.equal(source, published);
-  assert.match(source, /@version\s+0\.4\.4/);
-  assert.match(source, /Atalhos: Espaço mostra · 1 Errei · 2 Difícil/);
+  assert.match(source, /@version\s+0\.4\.5/);
+  assert.match(source, /Modo leve de exportação: captura e varredura desligadas nesta tela/);
+  assert.match(source, /URL\.revokeObjectURL\(url\), 60000/);
   assert.doesNotMatch(source.split('// ==/UserScript==')[1] || '', /\bfetch\s*\(|XMLHttpRequest|GM_xmlhttpRequest/);
 });
