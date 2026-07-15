@@ -2,7 +2,7 @@
 
 A Fase 1 é um userscript de captura e diagnóstico para uso em navegador Android com gerenciador de userscripts. Ela não envia dados para a internet, não chama Android Intent, não integra com AnkiDroid e não inclui aplicativo Android nativo.
 
-## Fluxo da versão 0.3.0
+## Fluxo da versão 0.3.1
 
 1. Abra uma sessão de flashcards na Osler com o userscript instalado.
 2. Toque em **Mostrar resposta**.
@@ -17,8 +17,11 @@ Na página real da Osler não é necessário calibrar pergunta, assunto, respost
 - `topic` e `deck`: primeiro `<strong>` da pergunta, sem pontuação final.
 - `question.text` e `question.html`: pergunta com cada `.cloze-answer` substituído por `[...]`.
 - `question.revealedText` e `question.revealedHtml`: versão revelada.
-- `answer.text`, `answer.html` e `answer.items`: uma ou várias respostas ocultas.
+- `answer`: usa os elementos `.cloze-answer` quando existem.
+- Em cards sem cloze, `answer` é obtido do bloco exibido entre a pergunta e `div.osler-card-explanation`, incluindo itens de lista.
 - `explanation`: todo o bloco `div.osler-card-explanation`, incluindo todos os parágrafos.
+
+O campo `answer.source` informa se a origem foi `cloze`, `intermediate-block` ou `manual-fallback`.
 
 ## Fallback e limitações
 
