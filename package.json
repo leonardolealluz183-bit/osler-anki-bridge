@@ -1,6 +1,6 @@
 {
   "name": "osler-anki-bridge",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "private": true,
   "description": "Phase 1 automatic capture diagnostics for Osler pages.",
   "scripts": {
