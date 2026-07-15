@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Osler Capture Diagnostics — página simulada</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 840px; line-height: 1.55; }
+      main { border: 1px solid #ddd; border-radius: 16px; padding: 1.5rem; }
+      .answer, .explanation { background: #f6f8fa; border-radius: 12px; padding: 1rem; }
+      .actions { display: flex; gap: .75rem; margin-top: 1rem; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p data-osler-deck>Hematologia / Anemias</p>
+      <h1 data-osler-question>Qual achado diferencia anemia ferropriva de talassemia menor?</h1>
+      <section class="answer" data-osler-answer>
+        Na anemia ferropriva espera-se <strong>ferritina baixa</strong> e RDW elevado; na talassemia menor, o RDW tende a ser normal e a contagem de hemácias pode estar preservada ou elevada.
+      </section>
+      <section class="explanation" data-osler-explanation>
+        A calibração deve selecionar pergunta, resposta, explicação, assunto/deck e os botões Errei/Difícil. O botão Acertei permanece sem captura por padrão.
+      </section>
+      <div class="actions">
+        <button type="button" data-osler-wrong>Errei</button>
+        <button type="button" data-osler-hard>Difícil</button>
+        <button type="button" data-osler-correct>Acertei</button>
+      </div>
+    </main>
+    <script src="../userscript/osler-anki-bridge.user.js"></script>
+  </body>
+</html>
