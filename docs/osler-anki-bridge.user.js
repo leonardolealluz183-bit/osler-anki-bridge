@@ -1,11 +1,13 @@
 // ==UserScript==
 // @name         Osler Anki Bridge
 // @namespace    https://github.com/osler-anki-bridge/osler-anki-bridge
-// @version      0.4.6
-// @description  Captura transacional de cards da Osler: salva antes de avançar, com atalhos 1/2, auditoria e exportação TSV.
+// @version      0.4.7
+// @description  Captura transacional de cards da Osler, confirma o avanço, mantém fila permanente e exporta TSV.
 // @match        https://oslermedicina.com.br/*
 // @match        https://*.oslermedicina.com.br/*
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        unsafeWindow
 // @run-at       document-idle
 // @updateURL    https://raw.githubusercontent.com/leonardolealluz183-bit/osler-anki-bridge/phase-2-android-bridge/docs/osler-anki-bridge.user.js
 // @downloadURL  https://raw.githubusercontent.com/leonardolealluz183-bit/osler-anki-bridge/phase-2-android-bridge/docs/osler-anki-bridge.user.js
@@ -14,15 +16,17 @@
 (function bootstrap(global) {
   'use strict';
 
-  const VERSION = '0.4.6';
+  const VERSION = '0.4.7';
   const QUEUE_KEY = 'oslerAnkiBridge.queue.v1';
   const AUDIT_KEY = 'oslerAnkiBridge.audit.v1';
   const EXPORT_DECK = 'Osler';
-  const PANEL_ID = 'osler-anki-bridge-v046';
+  const PANEL_ID = 'osler-anki-bridge-v047';
   const CLOZE_SELECTOR = '.cloze-answer,[class*="cloze-answer"],[class*="ClozeAnswer"],[class*="clozeAnswer"]';
   const SENSITIVE_QUERY_PARAM = /^(token|access_token|auth|authorization|signature|sig|key|jwt)$/i;
   const CAPTURE_RETRY_MS = 60;
   const CAPTURE_TIMEOUT_MS = 2200;
+  const ADVANCE_CONFIRM_MS = 950;
+  const ADVANCE_POLL_MS = 50;
 
   let queue = [];
   let audit = [];
@@ -31,7 +35,8 @@
   let globalListenersInstalled = false;
   let lastKnownPath = '';
   let ratingTransaction = null;
-  let syntheticRatingUntil = 0;
+  let nativeReplayUntil = 0;
+  let pendingAdvance = null;
 
   const now = () => new Date().toISOString();
   const normalizeWhitespace = (value) => String(value || '').replace(/\s+/g, ' ').trim();
@@ -461,12 +466,55 @@
     return { valid: reasons.length === 0, reasons };
   }
 
-  function readStoredArray(key) {
+  function parseStoredValue(value) {
+    if (Array.isArray(value)) return value;
+    if (typeof value !== 'string' || !value.trim()) return [];
     try {
-      const value = JSON.parse(global.localStorage?.getItem?.(key) || '[]');
-      return Array.isArray(value) ? value : [];
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
     } catch (_error) {
       return [];
+    }
+  }
+
+  function readLocalArray(key) {
+    try {
+      return parseStoredValue(global.localStorage?.getItem?.(key));
+    } catch (_error) {
+      return [];
+    }
+  }
+
+  function readStoredArray(key) {
+    let permanent = [];
+    try {
+      if (typeof GM_getValue === 'function') permanent = parseStoredValue(GM_getValue(key, []));
+    } catch (_error) {
+      permanent = [];
+    }
+    if (permanent.length) return permanent;
+
+    const legacy = readLocalArray(key);
+    if (legacy.length) {
+      try {
+        if (typeof GM_setValue === 'function') GM_setValue(key, legacy);
+      } catch (_error) {
+        // Mantém o fallback local quando o armazenamento do userscript não estiver disponível.
+      }
+    }
+    return legacy;
+  }
+
+  function writeStoredArray(key, value) {
+    try {
+      if (typeof GM_setValue === 'function') GM_setValue(key, value);
+    } catch (_error) {
+      // O espelho local abaixo continua protegendo a fila.
+    }
+    try {
+      global.localStorage?.setItem?.(key, JSON.stringify(value));
+    } catch (_error) {
+      // Sem ação: o armazenamento permanente pode continuar disponível.
     }
   }
 
@@ -484,12 +532,13 @@
   }
 
   function saveQueue() {
-    global.localStorage?.setItem?.(QUEUE_KEY, JSON.stringify(queue));
+    writeStoredArray(QUEUE_KEY, queue);
     renderPanel();
   }
 
   function saveAudit() {
-    global.localStorage?.setItem?.(AUDIT_KEY, JSON.stringify(audit.slice(-500)));
+    audit = audit.slice(-500);
+    writeStoredArray(AUDIT_KEY, audit);
     renderPanel();
   }
 
@@ -617,44 +666,169 @@
       })[0] || null;
   }
 
-  function finishNativeRating(trigger, documentRef, preferredButton = null) {
+  function advanceSnapshot(documentRef = global.document) {
+    const questionElement = findQuestionElement(documentRef);
+    return {
+      mode: pageMode(),
+      questionElement,
+      questionText: normalizeWhitespace(questionElement?.textContent),
+      hadRatingButtons: Boolean(findRatingButton('Errei', documentRef) || findRatingButton('Difícil', documentRef)),
+    };
+  }
+
+  function hasAdvanced(snapshot, documentRef = global.document) {
+    if (!snapshot) return false;
+    if (pageMode() !== 'test') return true;
+
+    const currentQuestion = findQuestionElement(documentRef);
+    const currentText = normalizeWhitespace(currentQuestion?.textContent);
+    if (snapshot.questionElement && currentQuestion && currentQuestion !== snapshot.questionElement) return true;
+    if (snapshot.questionText && currentText && currentText !== snapshot.questionText) return true;
+
+    const hasButtons = Boolean(findRatingButton('Errei', documentRef) || findRatingButton('Difícil', documentRef));
+    if (snapshot.hadRatingButtons && !hasButtons && currentQuestion) return true;
+    return false;
+  }
+
+  function waitForAdvance(snapshot, documentRef = global.document, timeoutMs = ADVANCE_CONFIRM_MS) {
+    const startedAt = Date.now();
+    return new Promise((resolve) => {
+      const check = () => {
+        if (hasAdvanced(snapshot, documentRef)) {
+          resolve(true);
+          return;
+        }
+        if (Date.now() - startedAt >= timeoutMs) {
+          resolve(false);
+          return;
+        }
+        global.setTimeout?.(check, ADVANCE_POLL_MS);
+      };
+      check();
+    });
+  }
+
+  function nativeButtonClick(trigger, documentRef, preferredButton = null) {
     const button = preferredButton && preferredButton.isConnected && isVisible(preferredButton)
       ? preferredButton
       : findRatingButton(trigger, documentRef);
-    if (!button) {
-      setMessage(`SALVO, MAS NÃO AVANÇOU — botão ${trigger} não encontrado.`, 'failed');
-      return false;
-    }
-
-    syntheticRatingUntil = Date.now() + 1200;
+    if (!button) return false;
+    nativeReplayUntil = Date.now() + 1800;
+    button.focus?.({ preventScroll: true });
     button.click();
     return true;
+  }
+
+  function nativePointerSequence(trigger, documentRef) {
+    const button = findRatingButton(trigger, documentRef);
+    if (!button) return false;
+    nativeReplayUntil = Date.now() + 1800;
+    button.focus?.({ preventScroll: true });
+    const rect = button.getBoundingClientRect?.() || { left: 0, top: 0, width: 1, height: 1 };
+    const init = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view: global,
+      clientX: Number(rect.left || 0) + Number(rect.width || 1) / 2,
+      clientY: Number(rect.top || 0) + Number(rect.height || 1) / 2,
+      button: 0,
+      buttons: 1,
+    };
+    const PointerCtor = global.PointerEvent || global.MouseEvent;
+    const MouseCtor = global.MouseEvent;
+    if (PointerCtor) {
+      button.dispatchEvent(new PointerCtor('pointerdown', init));
+      button.dispatchEvent(new PointerCtor('pointerup', { ...init, buttons: 0 }));
+    }
+    if (MouseCtor) {
+      button.dispatchEvent(new MouseCtor('mousedown', init));
+      button.dispatchEvent(new MouseCtor('mouseup', { ...init, buttons: 0 }));
+      button.dispatchEvent(new MouseCtor('click', { ...init, buttons: 0 }));
+    } else {
+      button.click();
+    }
+    return true;
+  }
+
+  function keyDescriptorForTrigger(trigger) {
+    return trigger === 'Errei'
+      ? { key: '1', code: 'Digit1', keyCode: 49 }
+      : { key: '2', code: 'Digit2', keyCode: 50 };
+  }
+
+  function nativeKeyboardReplay(trigger, documentRef = global.document) {
+    const KeyboardCtor = global.KeyboardEvent;
+    if (!KeyboardCtor) return false;
+    nativeReplayUntil = Date.now() + 1800;
+    const descriptor = keyDescriptorForTrigger(trigger);
+    const target = documentRef.activeElement || documentRef.body || documentRef;
+    ['keydown', 'keyup'].forEach((type) => {
+      const event = new KeyboardCtor(type, {
+        key: descriptor.key,
+        code: descriptor.code,
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+      });
+      try {
+        Object.defineProperty(event, 'keyCode', { get: () => descriptor.keyCode });
+        Object.defineProperty(event, 'which', { get: () => descriptor.keyCode });
+      } catch (_error) {
+        // Alguns navegadores não permitem redefinir essas propriedades.
+      }
+      target.dispatchEvent(event);
+    });
+    return true;
+  }
+
+  async function advanceAndConfirm(trigger, documentRef = global.document, preferredButton = null, snapshot = null) {
+    const baseline = snapshot || advanceSnapshot(documentRef);
+    if (hasAdvanced(baseline, documentRef)) return { advanced: true, method: 'already-advanced' };
+
+    const attempts = [
+      ['click', () => nativeButtonClick(trigger, documentRef, preferredButton)],
+      ['pointer', () => nativePointerSequence(trigger, documentRef)],
+      ['keyboard', () => nativeKeyboardReplay(trigger, documentRef)],
+    ];
+
+    for (const [method, invoke] of attempts) {
+      if (hasAdvanced(baseline, documentRef)) return { advanced: true, method: 'already-advanced' };
+      if (!invoke()) continue;
+      if (await waitForAdvance(baseline, documentRef)) return { advanced: true, method };
+    }
+    return { advanced: false, method: '' };
   }
 
   function startRatingTransaction(trigger, documentRef = global.document, source = 'keyboard', preferredButton = null) {
     if (pageMode() !== 'test') return Promise.resolve({ status: 'failed', reasons: ['fora da tela de teste'] });
     if (ratingTransaction) {
-      setMessage('AGUARDE — o card anterior ainda está sendo salvo.', 'waiting');
+      setMessage('AGUARDE — o card anterior ainda está sendo salvo ou avançado.', 'waiting');
       return ratingTransaction.promise;
     }
 
     const startedAt = Date.now();
     const questionAtStart = visibleQuestionLabel(documentRef);
+    const snapshot = advanceSnapshot(documentRef);
     let resolveTransaction;
     const promise = new Promise((resolve) => { resolveTransaction = resolve; });
-    ratingTransaction = { trigger, source, startedAt, promise };
+    ratingTransaction = { trigger, source, startedAt, promise, phase: 'capturing' };
     renderPanel();
     setMessage(`AGUARDANDO RESPOSTA — ${questionAtStart}`, 'waiting');
+
+    const finish = (result) => {
+      ratingTransaction = null;
+      renderPanel();
+      resolveTransaction(result);
+    };
 
     const attempt = () => {
       if (!ratingTransaction || ratingTransaction.startedAt !== startedAt) return;
       if (pageMode() !== 'test') {
         const detail = 'a tela mudou antes da captura';
         recordAudit('failed', `${source === 'keyboard' ? 'tecla' : 'botão'} ${trigger}`, null, detail);
-        ratingTransaction = null;
-        renderPanel();
         setMessage(`NÃO AVANÇOU — ${detail}.`, 'failed');
-        resolveTransaction({ status: 'failed', reasons: [detail] });
+        finish({ status: 'failed', reasons: [detail], advanced: false });
         return;
       }
 
@@ -662,15 +836,32 @@
       const validation = validateCard(card);
       if (validation.valid) {
         const auditTrigger = `${source === 'keyboard' ? 'tecla' : 'botão'} ${trigger}`;
-        const result = commitCard(card, auditTrigger);
-        ratingTransaction = null;
-        renderPanel();
-        if (result.status === 'added' || result.status === 'duplicate') {
-          const advanced = finishNativeRating(trigger, documentRef, preferredButton);
-          resolveTransaction({ ...result, advanced });
+        let result;
+        if (pendingAdvance && pendingAdvance.id === card.id) {
+          result = { status: 'already-saved', card, reasons: [] };
+          setMessage(`JÁ SALVO — tentando avançar novamente: ${shortLabel(card.question.text)}`, 'waiting');
+        } else {
+          result = commitCard(card, auditTrigger);
+        }
+
+        if (!['added', 'duplicate', 'already-saved'].includes(result.status)) {
+          finish(result);
           return;
         }
-        resolveTransaction(result);
+
+        ratingTransaction.phase = 'advancing';
+        renderPanel();
+        setMessage(`SALVO — avançando: ${shortLabel(card.question.text)}`, 'waiting');
+        advanceAndConfirm(trigger, documentRef, preferredButton, snapshot).then(({ advanced, method }) => {
+          if (advanced) {
+            pendingAdvance = null;
+            setMessage(`SALVO E AVANÇOU — ${shortLabel(card.question.text)}`, 'added');
+          } else {
+            pendingAdvance = { id: card.id, trigger, at: Date.now() };
+            setMessage(`SALVO, MAS NÃO AVANÇOU — pressione ${trigger === 'Errei' ? '1' : '2'} novamente. O card não será duplicado.`, 'failed');
+          }
+          finish({ ...result, advanced, advanceMethod: method });
+        });
         return;
       }
 
@@ -678,10 +869,8 @@
         const detail = validation.reasons.join(', ') || 'resposta não apareceu';
         const auditTrigger = `${source === 'keyboard' ? 'tecla' : 'botão'} ${trigger}`;
         recordAudit('failed', auditTrigger, card, `bloqueado sem avançar: ${detail}`);
-        ratingTransaction = null;
-        renderPanel();
         setMessage(`NÃO AVANÇOU — ${questionAtStart} — ${detail}. Mostre a resposta e tente novamente.`, 'failed');
-        resolveTransaction({ status: 'failed', card: null, reasons: validation.reasons, advanced: false });
+        finish({ status: 'failed', card: null, reasons: validation.reasons, advanced: false });
         return;
       }
 
@@ -705,8 +894,8 @@
   function keyTriggerForEvent(event) {
     if (!event || event.repeat || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return null;
     if (isEditableTarget(event.target)) return null;
-    if (event.key === '1' || event.code === 'Numpad1') return 'Errei';
-    if (event.key === '2' || event.code === 'Numpad2') return 'Difícil';
+    if (event.key === '1' || event.code === 'Numpad1' || event.code === 'Digit1') return 'Errei';
+    if (event.key === '2' || event.code === 'Numpad2' || event.code === 'Digit2') return 'Difícil';
     return null;
   }
 
@@ -721,7 +910,7 @@
     globalListenersInstalled = true;
 
     const keyboardHandler = (event) => {
-      if (pageMode() !== 'test') return;
+      if (pageMode() !== 'test' || Date.now() < nativeReplayUntil) return;
       const trigger = keyTriggerForEvent(event);
       if (!trigger) return;
       blockEvent(event);
@@ -730,11 +919,9 @@
 
     global.addEventListener?.('keydown', keyboardHandler, true);
     global.addEventListener?.('keyup', keyboardHandler, true);
-    documentRef.addEventListener('keydown', keyboardHandler, true);
-    documentRef.addEventListener('keyup', keyboardHandler, true);
 
     documentRef.addEventListener('click', (event) => {
-      if (pageMode() !== 'test' || Date.now() < syntheticRatingUntil) return;
+      if (pageMode() !== 'test' || Date.now() < nativeReplayUntil) return;
       const path = event.composedPath?.() || [event.target];
       const button = path.find((node) => ratingTrigger(node));
       const trigger = ratingTrigger(button);
@@ -745,8 +932,9 @@
   }
 
   function syncPageMode() {
-    if (pageMode() !== 'test' && ratingTransaction) {
+    if (pageMode() !== 'test') {
       ratingTransaction = null;
+      pendingAdvance = null;
     }
     renderPanel();
   }
@@ -831,6 +1019,8 @@
       queueSize: queue.length,
       sessionStats,
       transactionActive: Boolean(ratingTransaction),
+      pendingAdvance,
+      permanentStorage: typeof GM_setValue === 'function',
       events: audit,
     };
     const filename = `osler-anki-diagnostico-${Date.now()}.json`;
@@ -849,10 +1039,17 @@
     const mode = pageMode();
     panel.querySelector('[data-role="status"]').textContent = `${queue.length} card(s) na fila para o AnkiDroid`;
     panel.querySelector('[data-role="session"]').textContent = `Nesta sessão: ${sessionStats.added} adicionados · ${sessionStats.duplicate} duplicados · ${sessionStats.failed} falhas`;
+    panel.querySelector('[data-role="storage"]').textContent = typeof GM_setValue === 'function'
+      ? 'Fila permanente do Violentmonkey ativa.'
+      : 'Fila em armazenamento local de contingência.';
     panel.querySelector('[data-role="mode"]').textContent = mode === 'test'
       ? ratingTransaction
-        ? `Salvando antes de avançar: ${ratingTransaction.trigger}…`
-        : 'Captura protegida: Espaço mostra · 1 Errei · 2 Difícil. Só avança depois de salvar.'
+        ? ratingTransaction.phase === 'advancing'
+          ? `Card salvo; confirmando avanço como ${ratingTransaction.trigger}…`
+          : `Aguardando e salvando antes de avançar: ${ratingTransaction.trigger}…`
+        : pendingAdvance
+          ? `Card já salvo, mas ainda na tela. Pressione ${pendingAdvance.trigger === 'Errei' ? '1' : '2'} para tentar avançar novamente.`
+          : 'Captura protegida: Espaço mostra · 1 Errei · 2 Difícil. O avanço é confirmado.'
       : mode === 'report'
         ? 'Modo leve de exportação: captura desligada nesta tela.'
         : 'Modo leve: abra um teste para ativar a captura.';
@@ -862,17 +1059,20 @@
 
   function install(documentRef = global.document) {
     if (!documentRef.body || documentRef.getElementById(PANEL_ID)) return;
-    ['osler-anki-bridge-v042', 'osler-anki-bridge-v043', 'osler-anki-bridge-v044', 'osler-anki-bridge-v045'].forEach((id) => {
+    ['osler-anki-bridge-v042', 'osler-anki-bridge-v043', 'osler-anki-bridge-v044', 'osler-anki-bridge-v045', 'osler-anki-bridge-v046'].forEach((id) => {
       documentRef.getElementById(id)?.remove?.();
     });
     queue = loadQueue();
     audit = loadAudit();
+    saveQueue();
+    saveAudit();
     panel = documentRef.createElement('section');
     panel.id = PANEL_ID;
     panel.innerHTML = `
       <strong>Osler Anki Bridge — ${VERSION}</strong>
       <p data-role="status"></p>
-      <div data-role="session" style="margin-bottom:6px"></div>
+      <div data-role="session" style="margin-bottom:4px"></div>
+      <div data-role="storage" style="margin-bottom:6px"></div>
       <button data-action="capture">Adicionar card atual</button>
       <button data-action="download">Baixar TSV</button>
       <button data-action="audit">Baixar log</button>
@@ -890,6 +1090,8 @@
   }
 
   const api = {
+    advanceAndConfirm,
+    advanceSnapshot,
     buildTsv,
     capture,
     clozesInCard,
@@ -900,16 +1102,22 @@
     findExplanationForQuestion,
     findQuestionElement,
     findRatingButton,
+    hasAdvanced,
     isCitationText,
+    keyDescriptorForTrigger,
     keyTriggerForEvent,
     pageMode,
+    parseStoredValue,
     sanitizeHtml,
     stableHash,
     startRatingTransaction,
     validateCard,
     visibilityMetrics,
+    waitForAdvance,
   };
-  global.OslerAnkiBridgeV046 = api;
+  global.OslerAnkiBridgeV047 = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else install();
-})(typeof globalThis !== 'undefined' ? globalThis : window);
+})(typeof unsafeWindow !== 'undefined'
+  ? unsafeWindow
+  : (typeof window !== 'undefined' ? window : globalThis));
