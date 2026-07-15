@@ -2,30 +2,28 @@
 
 Userscript Android-only que captura cards marcados como **Errei** ou **Difícil** na Osler, mantém uma fila persistente e exporta tudo de uma vez para importação no AnkiDroid.
 
-## Versão 0.4.4 — Fase 2
+## Versão 0.4.5 — Fase 2
 
 Correções principais:
 
-- adiciona atalhos de teclado: **Espaço** continua mostrando a resposta pela Osler, **1** captura Errei e **2** captura Difícil;
-- distingue cards com o mesmo enunciado e respostas ocultas diferentes dentro de listas;
-- inclui no identificador a posição da lacuna e a resposta revelada, evitando falsas duplicatas;
-- prioriza somente a pergunta realmente visível na tela e não reutiliza snapshot antigo de outro card;
-- mostra o resultado de cada tentativa com a pergunta correspondente: adicionado, duplicado ou falhou;
-- mantém um log persistente de até 300 eventos e permite baixar o diagnóstico em JSON;
-- continua capturando cards sem bloco de explicação e respostas em lista;
-- preserva a fila em `localStorage`, remove tokens temporários e exporta TSV para o AnkiDroid.
+- mantém os atalhos: **Espaço** mostra a resposta pela Osler, **1** captura Errei e **2** captura Difícil;
+- distingue cards com o mesmo enunciado e respostas ocultas diferentes;
+- mostra cada tentativa como adicionada, duplicada ou falhou e mantém log persistente;
+- desliga completamente captura, varredura de DOM e `MutationObserver` na tela pesada `/test/report`;
+- acompanha mudanças de rota da aplicação e ativa a captura somente em `/test`;
+- mantém o painel em modo leve no relatório para exportar TSV e log sem travar a página;
+- troca `File` por `Blob` no download e mantém a URL do arquivo por 60 segundos, reduzindo falhas de download no Firefox Android;
+- preserva a fila existente em `localStorage` durante a atualização.
 
-O formato real que motivou a 0.4.4 foi uma sequência de cards com o mesmo enunciado sobre aferição da pressão arterial, mas com uma resposta oculta diferente em cada item da lista. Na 0.4.3, esses cards podiam receber o mesmo ID e aparecer incorretamente como duplicados.
+O problema que motivou a 0.4.5 ocorreu no relatório final de uma sessão com 203 cards: a varredura do script continuava ativa sobre uma página muito grande, tornando os botões da Osler e o download praticamente irresponsivos.
 
 ## Fluxo
 
-1. Pressione **Espaço** para mostrar a resposta.
-2. Pressione **1** para Errei ou **2** para Difícil.
-3. O painel informa exatamente qual pergunta foi adicionada, considerada duplicada ou rejeitada.
-4. Acertei continua ignorado.
-5. **Adicionar card atual** permanece como fallback manual.
-6. **Baixar log** exporta o histórico de tentativas para diagnóstico.
-7. Baixe o TSV ao final da sessão e confira antes de importar no AnkiDroid.
+1. Durante o teste, pressione **Espaço**, depois **1** ou **2**.
+2. No relatório final, o painel muda para **Modo leve de exportação**.
+3. Clique em **Baixar TSV**; a fila permanece salva mesmo antes do download.
+4. **Baixar log** exporta o histórico de tentativas para diagnóstico.
+5. Confira o TSV antes de importar no AnkiDroid.
 
 ## Desenvolvimento
 
