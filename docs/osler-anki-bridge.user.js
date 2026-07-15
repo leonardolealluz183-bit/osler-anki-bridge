@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Osler Anki Bridge
 // @namespace    https://github.com/osler-anki-bridge/osler-anki-bridge
-// @version      0.4.0
-// @description  Captura cards da Osler e exporta a fila em TSV para importação em lote no AnkiDroid.
+// @version      0.4.1
+// @description  Captura cards da Osler, mantém uma fila persistente e exporta TSV para o AnkiDroid.
 // @match        https://oslermedicina.com.br/*
 // @match        https://*.oslermedicina.com.br/*
 // @updateURL    https://leonardolealluz183-bit.github.io/osler-anki-bridge/osler-anki-bridge.user.js
@@ -35,7 +35,10 @@
   let config = {};
   let panelRefs = null;
   let documentListenersInstalled = false;
+  let observer = null;
   let lastGesture = { trigger: '', at: 0 };
+  let queueRepair = { removed: 0, cleaned: 0 };
+  const boundButtons = typeof WeakSet === 'function' ? new WeakSet() : new Set();
 
   function now() {
     return new Date().toISOString();
@@ -50,6 +53,24 @@
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
       .toLowerCase();
+  }
+
+  function stripHtml(value) {
+    return normalizeWhitespace(String(value || '').replace(/<[^>]+>/g, ' '));
+  }
+
+  function isVerdictOnly(value) {
+    const normalized = normalizeButtonText(value).replace(/[.!?:;,–—-]+$/g, '').trim();
+    return new Set([
+      'sim',
+      'nao',
+      'verdadeiro',
+      'falso',
+      'correto',
+      'correta',
+      'incorreto',
+      'incorreta',
+    ]).has(normalized);
   }
 
   function log(message, details = {}) {
@@ -84,33 +105,6 @@
     config = {};
     storage?.removeItem?.(CONFIG_KEY);
     log('calibração limpa');
-  }
-
-  function loadQueue(storage = global.localStorage) {
-    const loaded = parseStoredJson(storage, QUEUE_KEY, []);
-    if (!Array.isArray(loaded)) return [];
-    const unique = [];
-    const ids = new Set();
-    loaded.forEach((card) => {
-      if (!card?.id || ids.has(card.id)) return;
-      ids.add(card.id);
-      unique.push(card);
-    });
-    return unique;
-  }
-
-  function saveQueue(queue = capturedCards, storage = global.localStorage) {
-    capturedCards = Array.isArray(queue) ? [...queue] : [];
-    storage?.setItem?.(QUEUE_KEY, JSON.stringify(capturedCards));
-    renderPanel();
-    return capturedCards;
-  }
-
-  function clearQueue(storage = global.localStorage) {
-    capturedCards = [];
-    storage?.removeItem?.(QUEUE_KEY);
-    log('fila limpa');
-    return capturedCards;
   }
 
   function cssEscape(value) {
@@ -162,6 +156,13 @@
     }
   }
 
+  function unwrapElement(element) {
+    const parent = element?.parentNode;
+    if (!parent) return;
+    while (element.firstChild) parent.insertBefore(element.firstChild, element);
+    element.remove();
+  }
+
   function sanitizeHtml(html, documentRef = global.document) {
     const template = documentRef?.createElement?.('template');
     if (!template) {
@@ -169,6 +170,9 @@
         .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
         .replace(/\s+on[a-z]+=(("[^"]*")|('[^']*')|[^\s>]+)/gi, '')
         .replace(/\s+(href|src|xlink:href|formaction)=(("|')?\s*(javascript|data):[^\s>]*(\3)?)/gi, '')
+        .replace(/<mark\b[^>]*class=("|')[^"']*\bosler-highlight\b[^"']*\1[^>]*>/gi, '')
+        .replace(/<\/mark>/gi, '')
+        .replace(/\s+data-(start|end)-offset=("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
         .replace(/([?&])(token|access_token|auth|authorization|signature|sig|key|jwt)=[^&"'\s>]*/gi, '$1')
         .replace(/[?&]+(?=["'\s>])/g, '')
         .trim();
@@ -178,6 +182,11 @@
     if (!template.content?.querySelectorAll) return String(template.innerHTML || '').trim();
 
     template.content.querySelectorAll('script, iframe, object, embed, link[rel="import"]').forEach((node) => node.remove());
+    template.content.querySelectorAll('mark.osler-highlight').forEach(unwrapElement);
+    template.content.querySelectorAll('[data-start-offset], [data-end-offset]').forEach((node) => {
+      node.removeAttribute('data-start-offset');
+      node.removeAttribute('data-end-offset');
+    });
     template.content.querySelectorAll('*').forEach((node) => {
       Array.from(node.attributes).forEach((attr) => {
         if (DANGEROUS_ATTR.test(attr.name)) {
@@ -243,31 +252,58 @@
     return normalizeWhitespace(value).replace(/[\s.:;,!?–—-]+$/u, '');
   }
 
-  function findQuestionElement(explanationElement) {
-    if (!explanationElement) return null;
+  function paragraphRemainder(element) {
+    if (!element) return '';
+    const strong = element.querySelector?.('strong');
+    if (!strong) return normalizeWhitespace(element.textContent);
+    const clone = element.cloneNode?.(true);
+    if (clone?.querySelector) {
+      clone.querySelector('strong')?.remove?.();
+      return normalizeWhitespace(clone.textContent);
+    }
+    return normalizeWhitespace(String(element.textContent || '').replace(String(strong.textContent || ''), ''));
+  }
 
-    let fallback = null;
-    let sibling = explanationElement.previousElementSibling;
+  function questionCandidateScore(element, distance = 0) {
+    if (!element || String(element.tagName || '').toLowerCase() !== 'p') return -Infinity;
+    const text = normalizeWhitespace(element.textContent);
+    if (!text || isVerdictOnly(text)) return -Infinity;
+    const strong = element.querySelector?.('strong');
+    const strongText = normalizeWhitespace(strong?.textContent);
+    const remainder = paragraphRemainder(element);
+    const hasCloze = Boolean(element.querySelector?.('.cloze-answer'));
+
+    let score = Math.min(text.length, 120) / 20 - distance / 100;
+    if (strong) score += 30;
+    if (hasCloze) score += 80;
+    if (remainder.length >= 3) score += 45;
+    if (/[?:.]$/.test(text)) score += 3;
+    if (strong && isVerdictOnly(strongText) && remainder.length < 3) return -Infinity;
+    return score;
+  }
+
+  function precedingParagraphs(explanationElement) {
+    const paragraphs = [];
+    let sibling = explanationElement?.previousElementSibling;
     while (sibling) {
-      if (String(sibling.tagName || '').toLowerCase() === 'p') {
-        if (!fallback) fallback = sibling;
-        if (sibling.querySelector?.('strong')) return sibling;
-      }
+      if (String(sibling.tagName || '').toLowerCase() === 'p') paragraphs.push(sibling);
       sibling = sibling.previousElementSibling;
     }
-    if (fallback) return fallback;
+    return paragraphs;
+  }
 
-    const parent = explanationElement.parentElement;
-    if (!parent) return null;
-    const children = Array.from(parent.children || []);
-    const explanationIndex = children.indexOf(explanationElement);
-    for (let index = explanationIndex - 1; index >= 0; index -= 1) {
-      const candidate = children[index];
-      if (String(candidate?.tagName || '').toLowerCase() !== 'p') continue;
-      if (!fallback) fallback = candidate;
-      if (candidate.querySelector?.('strong')) return candidate;
-    }
-    return fallback;
+  function findQuestionElement(explanationElement) {
+    const candidates = precedingParagraphs(explanationElement);
+    let best = null;
+    let bestScore = -Infinity;
+    candidates.forEach((candidate, index) => {
+      const score = questionCandidateScore(candidate, index);
+      if (score > bestScore) {
+        best = candidate;
+        bestScore = score;
+      }
+    });
+    return best;
   }
 
   function replaceClozesWithPlaceholders(questionElement) {
@@ -352,8 +388,19 @@
     };
   }
 
+  function visibleExplanation(documentRef = global.document) {
+    const list = Array.from(documentRef?.querySelectorAll?.('div.osler-card-explanation') || []);
+    if (!list.length) return documentRef?.querySelector?.('div.osler-card-explanation') || null;
+    const visible = list.filter((element) => {
+      if (element.hidden) return false;
+      if (typeof element.getClientRects === 'function' && element.getClientRects().length) return true;
+      return element.offsetParent !== null;
+    });
+    return (visible.length ? visible : list).at(-1) || null;
+  }
+
   function extractOslerCard(documentRef = global.document) {
-    const explanationElement = documentRef?.querySelector?.('div.osler-card-explanation');
+    const explanationElement = visibleExplanation(documentRef);
     const questionElement = findQuestionElement(explanationElement);
     if (!explanationElement || !questionElement) return null;
 
@@ -410,19 +457,125 @@
     ].join('\n---\n'));
   }
 
+  function cleanStoredCard(card, documentRef = global.document) {
+    if (!card || typeof card !== 'object') return null;
+    const question = card.question || {};
+    const answer = card.answer || {};
+    const explanation = card.explanation || {};
+    const topicText = stripTopicPunctuation(card.topic?.text || card.deck?.text || '');
+    const cleaned = {
+      ...card,
+      question: {
+        ...question,
+        text: normalizeWhitespace(question.text),
+        html: sanitizeHtml(question.html || escapeHtml(question.text), documentRef),
+        revealedText: normalizeWhitespace(question.revealedText || question.text),
+        revealedHtml: sanitizeHtml(question.revealedHtml || question.html || escapeHtml(question.revealedText || question.text), documentRef),
+      },
+      answer: {
+        ...answer,
+        text: normalizeWhitespace(answer.text),
+        html: sanitizeHtml(answer.html || escapeHtml(answer.text), documentRef),
+        items: Array.isArray(answer.items)
+          ? answer.items.map((item) => ({
+            text: normalizeWhitespace(item?.text),
+            html: sanitizeHtml(item?.html || escapeHtml(item?.text), documentRef),
+          }))
+          : [],
+      },
+      explanation: {
+        ...explanation,
+        text: normalizeWhitespace(explanation.text),
+        html: sanitizeHtml(explanation.html || escapeHtml(explanation.text), documentRef),
+      },
+      topic: {
+        ...(card.topic || {}),
+        text: topicText,
+        html: sanitizeHtml(card.topic?.html || escapeHtml(topicText), documentRef),
+      },
+      deck: {
+        ...(card.deck || {}),
+        text: topicText,
+        html: sanitizeHtml(card.deck?.html || escapeHtml(topicText), documentRef),
+      },
+    };
+    cleaned.id = cleaned.id || buildStableId(cleaned);
+    return cleaned;
+  }
+
+  function validateCardForExport(card) {
+    const questionText = normalizeWhitespace(card?.question?.text || stripHtml(card?.question?.html));
+    const answerText = normalizeWhitespace(card?.answer?.text || stripHtml(card?.answer?.html));
+    const answerHtml = String(card?.answer?.html || '');
+    const topicText = normalizeWhitespace(card?.topic?.text || card?.deck?.text);
+    const hasAnswer = Boolean(answerText || /<(img|li|ul|ol|table|svg)\b/i.test(answerHtml));
+    const reasons = [];
+
+    if (!questionText) reasons.push('pergunta vazia');
+    if (!hasAnswer) reasons.push('resposta vazia');
+    if (isVerdictOnly(questionText)) reasons.push('pergunta é apenas um veredito');
+    if (isVerdictOnly(topicText)) reasons.push('assunto é apenas um veredito');
+
+    return { valid: reasons.length === 0, reasons };
+  }
+
+  function loadQueue(storage = global.localStorage, documentRef = global.document) {
+    const loaded = parseStoredJson(storage, QUEUE_KEY, []);
+    if (!Array.isArray(loaded)) return [];
+
+    const unique = [];
+    const ids = new Set();
+    let removed = 0;
+    let cleanedCount = 0;
+
+    loaded.forEach((raw) => {
+      const card = cleanStoredCard(raw, documentRef);
+      if (!card || ids.has(card.id)) {
+        removed += 1;
+        return;
+      }
+      if (!validateCardForExport(card).valid) {
+        removed += 1;
+        return;
+      }
+      if (JSON.stringify(card) !== JSON.stringify(raw)) cleanedCount += 1;
+      ids.add(card.id);
+      unique.push(card);
+    });
+
+    queueRepair = { removed, cleaned: cleanedCount };
+    storage?.setItem?.(QUEUE_KEY, JSON.stringify(unique));
+    return unique;
+  }
+
+  function saveQueue(queue = capturedCards, storage = global.localStorage) {
+    capturedCards = Array.isArray(queue) ? [...queue] : [];
+    storage?.setItem?.(QUEUE_KEY, JSON.stringify(capturedCards));
+    renderPanel();
+    return capturedCards;
+  }
+
+  function clearQueue(storage = global.localStorage) {
+    capturedCards = [];
+    storage?.removeItem?.(QUEUE_KEY);
+    log('fila limpa');
+    return capturedCards;
+  }
+
   function captureCard(trigger, documentRef = global.document, storage = global.localStorage) {
     const extracted = extractOslerCard(documentRef) || extractFallbackCard(documentRef);
-    const card = {
+    const card = cleanStoredCard({
       id: '',
       trigger,
       capturedAt: now(),
       url: global.location?.href || '',
       ...extracted,
-    };
+    }, documentRef);
     card.id = buildStableId(card);
 
-    if (!card.question?.text && !card.question?.revealedText) {
-      log('captura ignorada: pergunta não encontrada', { trigger });
+    const validation = validateCardForExport(card);
+    if (!validation.valid) {
+      log('captura rejeitada', { trigger, reasons: validation.reasons });
       return null;
     }
     if (capturedCards.some((existing) => existing.id === card.id)) {
@@ -477,6 +630,16 @@
     return null;
   }
 
+  function captureFromEventTarget(target, documentRef = global.document) {
+    const actionElement = findActionElement(target);
+    const trigger = triggerForButton(actionElement) || triggerFromOslerStructure(actionElement);
+    if (!trigger) return null;
+    const timestamp = Date.now();
+    if (lastGesture.trigger === trigger && timestamp - lastGesture.at < 1000) return null;
+    lastGesture = { trigger, at: timestamp };
+    return captureCard(trigger, documentRef);
+  }
+
   function handleDocumentAction(event, documentRef = global.document) {
     if (calibrationField) {
       if (!event.target || panelRefs?.root?.contains?.(event.target)) return null;
@@ -488,21 +651,43 @@
     }
 
     const path = event.composedPath?.() || [];
-    let trigger = null;
     for (const node of path) {
-      trigger = triggerForButton(node) || triggerFromOslerStructure(node);
-      if (trigger) break;
+      const result = captureFromEventTarget(node, documentRef);
+      if (result) return result;
     }
-    if (!trigger) {
-      const actionElement = findActionElement(event.target);
-      trigger = triggerForButton(actionElement) || triggerFromOslerStructure(actionElement);
-    }
-    if (!trigger) return null;
+    return captureFromEventTarget(event.target, documentRef);
+  }
 
-    const timestamp = Date.now();
-    if (lastGesture.trigger === trigger && timestamp - lastGesture.at < 1000) return null;
-    lastGesture = { trigger, at: timestamp };
-    return captureCard(trigger, documentRef);
+  function bindSrsButtons(documentRef = global.document) {
+    Array.from(documentRef?.querySelectorAll?.('button,[role="button"]') || []).forEach((button) => {
+      const trigger = triggerForButton(button) || triggerFromOslerStructure(button);
+      if (!trigger || boundButtons.has(button)) return;
+      boundButtons.add(button);
+      const handler = () => {
+        const timestamp = Date.now();
+        if (lastGesture.trigger === trigger && timestamp - lastGesture.at < 1000) return;
+        lastGesture = { trigger, at: timestamp };
+        captureCard(trigger, documentRef);
+      };
+      button.addEventListener?.('touchstart', handler, true);
+      button.addEventListener?.('pointerdown', handler, true);
+      button.addEventListener?.('click', handler, true);
+    });
+  }
+
+  function installDocumentListeners(documentRef = global.document) {
+    if (documentListenersInstalled || !documentRef?.addEventListener) return false;
+    documentRef.addEventListener('touchstart', (event) => handleDocumentAction(event, documentRef), true);
+    documentRef.addEventListener('pointerdown', (event) => handleDocumentAction(event, documentRef), true);
+    documentRef.addEventListener('click', (event) => handleDocumentAction(event, documentRef), true);
+    bindSrsButtons(documentRef);
+
+    if (typeof global.MutationObserver === 'function' && documentRef.body) {
+      observer = new global.MutationObserver(() => bindSrsButtons(documentRef));
+      observer.observe(documentRef.body, { childList: true, subtree: true });
+    }
+    documentListenersInstalled = true;
+    return true;
   }
 
   function startCalibration(field) {
@@ -516,15 +701,6 @@
     saveConfig({ ...config, [calibrationField]: selector });
     log('calibração salva', { field: calibrationField, selector });
     calibrationField = null;
-    return true;
-  }
-
-  function installDocumentListeners(documentRef = global.document) {
-    if (documentListenersInstalled || !documentRef?.addEventListener) return false;
-    documentRef.addEventListener('touchstart', (event) => handleDocumentAction(event, documentRef), true);
-    documentRef.addEventListener('pointerdown', (event) => handleDocumentAction(event, documentRef), true);
-    documentRef.addEventListener('click', (event) => handleDocumentAction(event, documentRef), true);
-    documentListenersInstalled = true;
     return true;
   }
 
@@ -542,7 +718,11 @@
     return `"${normalized.replace(/"/g, '""')}"`;
   }
 
-  function cardToAnkiRow(card, documentRef = global.document) {
+  function cardToAnkiRow(rawCard, documentRef = global.document) {
+    const card = cleanStoredCard(rawCard, documentRef);
+    const validation = validateCardForExport(card);
+    if (!validation.valid) throw new Error(`Card inválido (${card?.id || 'sem ID'}): ${validation.reasons.join(', ')}`);
+
     const question = prepareHtmlForAnki(card.question?.html || escapeHtml(card.question?.text), documentRef);
     const answer = prepareHtmlForAnki(card.answer?.html || escapeHtml(card.answer?.text), documentRef);
     const explanation = prepareHtmlForAnki(card.explanation?.html || escapeHtml(card.explanation?.text), documentRef);
@@ -550,7 +730,7 @@
     const source = scrubSensitiveUrl(card.url || 'https://oslermedicina.com.br/test');
     const front = `<span style="display:none">osler:${escapeHtml(card.id)}</span>${question}`;
     const back = [
-      answer ? `<div class="osler-answer"><strong>Resposta</strong><br>${answer}</div>` : '',
+      `<div class="osler-answer"><strong>Resposta</strong><br>${answer}</div>`,
       explanation ? `<hr><div class="osler-explanation"><strong>Explicação</strong><br>${explanation}</div>` : '',
       `<hr><div class="osler-meta"><small>Assunto: ${escapeHtml(topic)} · ID: ${escapeHtml(card.id)} · <a href="${escapeHtml(source)}">Osler</a></small></div>`,
     ].filter(Boolean).join('');
@@ -558,8 +738,15 @@
     return [front, back, tags, EXPORT_DECK].map(tsvField).join('\t');
   }
 
+  function exportableCards(cards = capturedCards, documentRef = global.document) {
+    return cards
+      .map((card) => cleanStoredCard(card, documentRef))
+      .filter((card) => validateCardForExport(card).valid);
+  }
+
   function buildAnkiTsv(cards = capturedCards, documentRef = global.document) {
-    const rows = cards.map((card) => cardToAnkiRow(card, documentRef));
+    const validCards = exportableCards(cards, documentRef);
+    const rows = validCards.map((card) => cardToAnkiRow(card, documentRef));
     const headers = [
       '#separator:Tab',
       '#html:true',
@@ -577,8 +764,9 @@
   }
 
   function createExportFile(cards = capturedCards, documentRef = global.document) {
-    if (!cards.length) throw new Error('A fila está vazia.');
-    const contents = buildAnkiTsv(cards, documentRef);
+    const validCards = exportableCards(cards, documentRef);
+    if (!validCards.length) throw new Error('Não há cards válidos para exportar.');
+    const contents = buildAnkiTsv(validCards, documentRef);
     return new File([contents], exportFilename(), { type: 'text/tab-separated-values;charset=utf-8' });
   }
 
@@ -593,7 +781,7 @@
     anchor.click();
     anchor.remove();
     global.setTimeout?.(() => global.URL.revokeObjectURL(url), 1000);
-    log('arquivo TSV baixado', { filename: file.name, cards: cards.length });
+    log('arquivo TSV baixado', { filename: file.name, cards: exportableCards(cards, documentRef).length });
     return file;
   }
 
@@ -605,12 +793,12 @@
 
     if (!canShareFiles) {
       downloadExport(cards, documentRef);
-      log('compartilhamento de arquivo indisponível; TSV baixado como alternativa');
+      log('compartilhamento indisponível; TSV baixado');
       return { mode: 'download', file };
     }
 
     await navigatorRef.share(shareData);
-    log('TSV enviado ao compartilhamento do Android', { filename: file.name, cards: cards.length });
+    log('TSV enviado ao compartilhamento do Android', { filename: file.name });
     return { mode: 'share', file };
   }
 
@@ -639,9 +827,10 @@
     panelRefs.status.textContent = calibrationField
       ? `Toque no elemento de ${FIELD_LABELS[calibrationField]}`
       : `${capturedCards.length} card(s) na fila para o AnkiDroid`;
-    panelRefs.send.disabled = capturedCards.length === 0;
-    panelRefs.download.disabled = capturedCards.length === 0;
-    panelRefs.clear.disabled = capturedCards.length === 0;
+    const disabled = capturedCards.length === 0;
+    panelRefs.send.disabled = disabled;
+    panelRefs.download.disabled = disabled;
+    panelRefs.clear.disabled = disabled;
   }
 
   function createPanel(documentRef = global.document) {
@@ -695,7 +884,7 @@
   function install(documentRef = global.document) {
     if (!documentRef?.body || documentRef.getElementById('osler-capture-diagnostics')) return null;
     config = loadConfig();
-    capturedCards = loadQueue();
+    capturedCards = loadQueue(global.localStorage, documentRef);
     const root = createPanel(documentRef);
     documentRef.body.appendChild(root);
     panelRefs = {
@@ -708,15 +897,21 @@
     };
     installDocumentListeners(documentRef);
     renderPanel();
-    log('fase 2 instalada: fila persistente e exportação TSV ativas');
+    if (queueRepair.removed || queueRepair.cleaned) {
+      log('fila reparada ao carregar', queueRepair);
+    } else {
+      log('fase 2 instalada: fila persistente e exportação TSV ativas');
+    }
     return root;
   }
 
   const api = {
+    bindSrsButtons,
     buildAnkiTsv,
     buildStableId,
     captureCard,
     cardToAnkiRow,
+    cleanStoredCard,
     clearCalibration,
     clearQueue,
     createExportFile,
@@ -725,6 +920,7 @@
     elementsBetween,
     escapeHtml,
     exportFilename,
+    exportableCards,
     extractAnswers,
     extractIntermediateAnswer,
     extractOslerCard,
@@ -735,13 +931,16 @@
     handleDocumentAction,
     install,
     installDocumentListeners,
+    isVerdictOnly,
     loadConfig,
     loadQueue,
     logsJson,
     normalizeButtonText,
     normalizeTag,
     panelJson,
+    paragraphRemainder,
     prepareHtmlForAnki,
+    questionCandidateScore,
     readField,
     replaceClozesWithPlaceholders,
     sanitizeHtml,
@@ -756,6 +955,7 @@
     triggerForButton,
     triggerFromOslerStructure,
     tsvField,
+    validateCardForExport,
   };
   global.OslerCaptureDiagnostics = api;
   global.OslerAnkiBridge = api;
