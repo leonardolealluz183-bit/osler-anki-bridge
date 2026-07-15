@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         Osler Capture Diagnostics
 // @namespace    https://github.com/osler-anki-bridge/osler-anki-bridge
-// @version      0.2.0
-// @description  Phase 1 capture and diagnostics userscript for Osler cards. No network, AnkiDroid, or app integration.
+// @version      0.3.0
+// @description  Phase 1 automatic capture diagnostics for Osler cards. No network, AnkiDroid, or app integration.
 // @match        https://oslermedicina.com.br/*
 // @match        https://*.oslermedicina.com.br/*
-// @match        http://localhost:*/*
+// @updateURL    https://leonardolealluz183-bit.github.io/osler-anki-bridge/osler-anki-bridge.user.js
+// @downloadURL  https://leonardolealluz183-bit.github.io/osler-anki-bridge/osler-anki-bridge.user.js
 // @grant        none
 // @run-at       document-idle
 // ==/UserScript==
@@ -13,14 +14,12 @@
 (function bootstrap(global) {
   'use strict';
 
-  const STORAGE_KEY = 'oslerCaptureDiagnostics.config.v1';
+  const STORAGE_KEY = 'oslerCaptureDiagnostics.config.v2';
   const FIELD_LABELS = {
     question: 'pergunta',
     answer: 'resposta',
     explanation: 'explicação',
     deck: 'assunto/deck',
-    wrongButton: 'botão Errei',
-    hardButton: 'botão Difícil',
   };
   const FIELD_ORDER = Object.keys(FIELD_LABELS);
   const DANGEROUS_ATTR = /^(on|srcdoc$)/i;
@@ -32,9 +31,21 @@
   let logs = [];
   let config = {};
   let panelRefs = null;
+  let documentListenerInstalled = false;
 
   function now() {
     return new Date().toISOString();
+  }
+
+  function normalizeWhitespace(value) {
+    return String(value || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function normalizeButtonText(value) {
+    return normalizeWhitespace(value)
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase();
   }
 
   function log(message, details = {}) {
@@ -59,6 +70,13 @@
     renderPanel();
   }
 
+  function clearCalibration(storage = global.localStorage) {
+    config = {};
+    storage?.removeItem?.(STORAGE_KEY);
+    renderPanel();
+    log('calibração limpa');
+  }
+
   function cssEscape(value) {
     if (global.CSS?.escape) return global.CSS.escape(value);
     return String(value).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
@@ -74,10 +92,13 @@
     let current = element;
     while (current?.tagName && current.nodeType === 1 && parts.length < 5) {
       let part = current.tagName.toLowerCase();
-      if (current.classList?.length) part += `.${Array.from(current.classList).slice(0, 2).map(cssEscape).join('.')}`;
+      const stableClasses = Array.from(current.classList || [])
+        .filter((name) => !/^[a-zA-Z]+-[a-zA-Z]+$/.test(name))
+        .slice(0, 2);
+      if (stableClasses.length) part += `.${stableClasses.map(cssEscape).join('.')}`;
       const parent = current.parentElement;
       if (parent) {
-        const siblings = Array.from(parent.children).filter((child) => child.tagName === current.tagName);
+        const siblings = Array.from(parent.children || []).filter((child) => child.tagName === current.tagName);
         if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(current) + 1})`;
       }
       parts.unshift(part);
@@ -87,13 +108,14 @@
   }
 
   function sanitizeHtml(html, documentRef = global.document) {
-    const template = documentRef.createElement('template');
+    const template = documentRef?.createElement?.('template');
+    if (!template) return String(html || '').trim();
     template.innerHTML = html || '';
     if (!template.content?.querySelectorAll) {
       return String(html || '')
         .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
-        .replace(/\s+on[a-z]+=("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
-        .replace(/\s+(href|src|xlink:href|formaction)=("|')?\s*(javascript|data):[^\s>]*(\2)?/gi, '')
+        .replace(/\s+on[a-z]+=(("[^"]*")|('[^']*')|[^\s>]+)/gi, '')
+        .replace(/\s+(href|src|xlink:href|formaction)=(("|')?\s*(javascript|data):[^\s>]*(\3)?)/gi, '')
         .trim();
     }
     template.content.querySelectorAll('script, iframe, object, embed, link[rel="import"]').forEach((node) => node.remove());
@@ -107,13 +129,117 @@
     return template.innerHTML.trim();
   }
 
-  function readField(selector, documentRef = global.document) {
-    const element = selector ? documentRef.querySelector(selector) : null;
+  function readElement(element, selector = '', documentRef = global.document) {
     if (!element) return { selector, text: '', html: '' };
     return {
       selector,
-      text: element.textContent.replace(/\s+/g, ' ').trim(),
+      text: normalizeWhitespace(element.textContent),
       html: sanitizeHtml(element.innerHTML, documentRef),
+    };
+  }
+
+  function readField(selector, documentRef = global.document) {
+    const element = selector ? documentRef.querySelector(selector) : null;
+    return readElement(element, selector, documentRef);
+  }
+
+  function stripTopicPunctuation(value) {
+    return normalizeWhitespace(value).replace(/[\s.:;,!?–—-]+$/u, '');
+  }
+
+  function findQuestionElement(explanationElement) {
+    if (!explanationElement) return null;
+    let sibling = explanationElement.previousElementSibling;
+    while (sibling) {
+      if (String(sibling.tagName || '').toLowerCase() === 'p') return sibling;
+      sibling = sibling.previousElementSibling;
+    }
+
+    const parent = explanationElement.parentElement;
+    if (!parent) return null;
+    const children = Array.from(parent.children || []);
+    const explanationIndex = children.indexOf(explanationElement);
+    for (let index = explanationIndex - 1; index >= 0; index -= 1) {
+      if (String(children[index]?.tagName || '').toLowerCase() === 'p') return children[index];
+    }
+    return null;
+  }
+
+  function replaceClozesWithPlaceholders(questionElement) {
+    const clone = questionElement?.cloneNode?.(true);
+    if (!clone) return null;
+    Array.from(clone.querySelectorAll?.('.cloze-answer') || []).forEach((node) => {
+      if (typeof node.replaceWith === 'function') {
+        node.replaceWith(global.document?.createTextNode?.('[...]') || '[...]');
+      } else {
+        node.textContent = '[...]';
+        node.innerHTML = '[...]';
+      }
+    });
+    return clone;
+  }
+
+  function extractAnswers(questionElement, documentRef = global.document) {
+    const items = Array.from(questionElement?.querySelectorAll?.('.cloze-answer') || []).map((element) => ({
+      text: normalizeWhitespace(element.textContent),
+      html: sanitizeHtml(element.innerHTML, documentRef),
+    }));
+    return {
+      selector: '.cloze-answer',
+      text: items.map((item) => item.text).filter(Boolean).join('; '),
+      html: items.map((item) => item.html).filter(Boolean).join('; '),
+      items,
+    };
+  }
+
+  function extractTopic(questionElement, documentRef = global.document) {
+    const element = questionElement?.querySelector?.('strong') || null;
+    if (!element) return { selector: 'strong', text: '', html: '' };
+    return {
+      selector: 'strong',
+      text: stripTopicPunctuation(element.textContent),
+      html: sanitizeHtml(element.innerHTML, documentRef),
+    };
+  }
+
+  function extractOslerCard(documentRef = global.document) {
+    const explanationElement = documentRef?.querySelector?.('div.osler-card-explanation');
+    const questionElement = findQuestionElement(explanationElement);
+    if (!explanationElement || !questionElement) return null;
+
+    const revealedQuestion = readElement(questionElement, selectorFor(questionElement), documentRef);
+    const placeholderQuestion = replaceClozesWithPlaceholders(questionElement);
+    const topic = extractTopic(questionElement, documentRef);
+    const answer = extractAnswers(questionElement, documentRef);
+    const explanation = readElement(explanationElement, 'div.osler-card-explanation', documentRef);
+
+    return {
+      question: {
+        selector: revealedQuestion.selector,
+        text: normalizeWhitespace(placeholderQuestion?.textContent),
+        html: sanitizeHtml(placeholderQuestion?.innerHTML || '', documentRef),
+        revealedText: revealedQuestion.text,
+        revealedHtml: revealedQuestion.html,
+      },
+      answer,
+      explanation,
+      topic,
+      deck: { ...topic },
+    };
+  }
+
+  function extractFallbackCard(documentRef = global.document) {
+    const question = readField(config.question, documentRef);
+    return {
+      question: {
+        ...question,
+        revealedText: question.text,
+        revealedHtml: question.html,
+      },
+      answer: { ...readField(config.answer, documentRef), items: [] },
+      explanation: readField(config.explanation, documentRef),
+      topic: readField(config.deck, documentRef),
+      deck: readField(config.deck, documentRef),
     };
   }
 
@@ -128,25 +254,28 @@
 
   function buildStableId(card) {
     return stableHash([
-      card.question.text,
-      card.answer.text,
-      card.explanation.text,
-      card.deck.text,
+      card.topic?.text || card.deck?.text || '',
+      card.question?.revealedText || card.question?.text || '',
+      card.answer?.text || '',
+      card.explanation?.text || '',
     ].join('\n---\n'));
   }
 
   function captureCard(trigger, documentRef = global.document) {
+    const extracted = extractOslerCard(documentRef) || extractFallbackCard(documentRef);
     const card = {
       id: '',
       trigger,
       capturedAt: now(),
       url: global.location?.href || '',
-      question: readField(config.question, documentRef),
-      answer: readField(config.answer, documentRef),
-      explanation: readField(config.explanation, documentRef),
-      deck: readField(config.deck, documentRef),
+      ...extracted,
     };
     card.id = buildStableId(card);
+
+    if (!card.question?.text && !card.question?.revealedText) {
+      log('captura ignorada: pergunta não encontrada', { trigger });
+      return null;
+    }
 
     if (capturedCards.some((existing) => existing.id === card.id)) {
       log('captura duplicada ignorada', { id: card.id, trigger });
@@ -154,9 +283,32 @@
     }
 
     capturedCards.push(card);
-    log('card capturado', { id: card.id, trigger });
+    log('card capturado', { id: card.id, trigger, mode: extractOslerCard(documentRef) ? 'automático' : 'fallback' });
     renderPanel();
     return card;
+  }
+
+  function triggerForButton(button) {
+    const text = normalizeButtonText(button?.textContent);
+    if (text.includes('acertei')) return null;
+    if (text.includes('errei')) return 'botão Errei';
+    if (text.includes('dificil')) return 'botão Difícil';
+    return null;
+  }
+
+  function handleDocumentClick(event, documentRef = global.document) {
+    if (calibrationField) {
+      if (!event.target || panelRefs?.root?.contains?.(event.target)) return null;
+      event.preventDefault?.();
+      event.stopPropagation?.();
+      finishCalibration(event.target, documentRef);
+      return 'calibration';
+    }
+
+    const button = event.target?.closest?.('button') || (String(event.target?.tagName || '').toLowerCase() === 'button' ? event.target : null);
+    const trigger = triggerForButton(button);
+    if (!trigger) return null;
+    return captureCard(trigger, documentRef);
   }
 
   function startCalibration(field) {
@@ -165,26 +317,19 @@
   }
 
   function finishCalibration(element, documentRef = global.document) {
-    if (!calibrationField || !element || panelRefs?.root?.contains(element)) return false;
+    if (!calibrationField || !element || panelRefs?.root?.contains?.(element)) return false;
     const selector = selectorFor(element);
     saveConfig({ ...config, [calibrationField]: selector });
     log('calibração salva', { field: calibrationField, selector });
     calibrationField = null;
-    bindCaptureButtons(documentRef);
     return true;
   }
 
-  function bindCaptureButtons(documentRef = global.document) {
-    documentRef.querySelectorAll('[data-osler-capture-bound]').forEach((element) => {
-      element.removeAttribute('data-osler-capture-bound');
-    });
-
-    ['wrongButton', 'hardButton'].forEach((field) => {
-      const element = config[field] ? documentRef.querySelector(config[field]) : null;
-      if (!element) return;
-      element.setAttribute('data-osler-capture-bound', field);
-      element.addEventListener('click', () => captureCard(FIELD_LABELS[field], documentRef), { capture: true });
-    });
+  function installDocumentListener(documentRef = global.document) {
+    if (documentListenerInstalled || !documentRef?.addEventListener) return false;
+    documentRef.addEventListener('click', (event) => handleDocumentClick(event, documentRef), true);
+    documentListenerInstalled = true;
+    return true;
   }
 
   function copyText(text) {
@@ -211,7 +356,7 @@
     panelRefs.output.textContent = panelJson();
     panelRefs.status.textContent = calibrationField
       ? `Toque no elemento de ${FIELD_LABELS[calibrationField]}`
-      : `${capturedCards.length} card(s) capturado(s)`;
+      : `${capturedCards.length} card(s) capturado(s) — extração automática ativa`;
   }
 
   function createPanel(documentRef = global.document) {
@@ -220,7 +365,11 @@
     root.innerHTML = `
       <strong>Osler Capture Diagnostics — Fase 1</strong>
       <p data-role="status"></p>
-      <div data-role="calibration"></div>
+      <details>
+        <summary>Calibração manual (fallback)</summary>
+        <div data-role="calibration"></div>
+        <button type="button" data-action="clear-calibration">Limpar calibração</button>
+      </details>
       <button type="button" data-action="copy-json">Copiar JSON</button>
       <button type="button" data-action="copy-logs">Copiar logs</button>
       <pre data-role="output"></pre>
@@ -235,6 +384,7 @@
       button.addEventListener('click', () => startCalibration(field));
       calibration.appendChild(button);
     });
+    root.querySelector('[data-action="clear-calibration"]').addEventListener('click', () => clearCalibration());
     root.querySelector('[data-action="copy-json"]').addEventListener('click', () => copyText(panelJson()).then(() => log('JSON copiado')));
     root.querySelector('[data-action="copy-logs"]').addEventListener('click', () => copyText(logsJson()).then(() => log('logs copiados')));
     return root;
@@ -250,34 +400,38 @@
       output: root.querySelector('[data-role="output"]'),
       status: root.querySelector('[data-role="status"]'),
     };
-    documentRef.addEventListener('click', (event) => {
-      if (!calibrationField) return;
-      event.preventDefault();
-      event.stopPropagation();
-      finishCalibration(event.target, documentRef);
-    }, true);
-    bindCaptureButtons(documentRef);
+    installDocumentListener(documentRef);
     renderPanel();
-    log('userscript instalado sem integrações externas');
+    log('userscript instalado: extração automática ativa, sem integrações externas');
     return root;
   }
 
   const api = {
-    bindCaptureButtons,
     buildStableId,
     captureCard,
+    clearCalibration,
     createPanel,
+    extractAnswers,
+    extractOslerCard,
+    extractTopic,
+    findQuestionElement,
     finishCalibration,
+    handleDocumentClick,
     install,
+    installDocumentListener,
     loadConfig,
     logsJson,
+    normalizeButtonText,
     panelJson,
     readField,
+    replaceClozesWithPlaceholders,
     sanitizeHtml,
     saveConfig,
     selectorFor,
     stableHash,
     startCalibration,
+    stripTopicPunctuation,
+    triggerForButton,
   };
   global.OslerCaptureDiagnostics = api;
 
