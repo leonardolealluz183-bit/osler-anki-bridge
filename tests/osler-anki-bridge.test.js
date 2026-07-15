@@ -233,6 +233,7 @@ test('detects concatenated Errei and Difícil labels and ignores Acertei', () =>
     const node = {
       tagName: 'BUTTON',
       textContent: text,
+      innerText: text,
       parentElement: null,
       getAttribute() { return null; },
       closest() { return node; },
@@ -247,6 +248,37 @@ test('detects concatenated Errei and Difícil labels and ignores Acertei', () =>
   assert.equal(bridge.triggerForButton(bridge.findActionElement(nestedWrong)), 'botão Errei');
   assert.equal(bridge.triggerForButton(hard), 'botão Difícil');
   assert.equal(bridge.triggerForButton(correct), null);
+});
+
+test('falls back to Osler SRS button order when Errei has no readable label', () => {
+  const group = {
+    querySelectorAll() { return [wrong, hard, correct]; },
+  };
+  function srsButton(index) {
+    const node = {
+      tagName: 'BUTTON',
+      textContent: '',
+      innerText: '',
+      className: 'SRSButton-randomHash',
+      parentElement: null,
+      getAttribute() { return null; },
+      matches() { return false; },
+      closest(selector) {
+        if (selector === 'button,[role="button"]') return node;
+        if (selector === '[class*="ButtonsContainer"]') return group;
+        return null;
+      },
+    };
+    node.index = index;
+    return node;
+  }
+  const wrong = srsButton(0);
+  const hard = srsButton(1);
+  const correct = srsButton(2);
+
+  assert.equal(bridge.triggerFromOslerStructure(wrong), 'botão Errei');
+  assert.equal(bridge.triggerFromOslerStructure(hard), 'botão Difícil');
+  assert.equal(bridge.triggerFromOslerStructure(correct), null);
 });
 
 test('captures an automatic card once and ignores duplicates', () => {
@@ -264,7 +296,7 @@ test('captures an automatic card once and ignores duplicates', () => {
 
 test('userscript header targets Osler and provides update URLs without localhost', () => {
   const source = fs.readFileSync(path.join(__dirname, '../userscript/osler-anki-bridge.user.js'), 'utf8');
-  assert.match(source, /@version\s+0\.3\.3/);
+  assert.match(source, /@version\s+0\.3\.4/);
   assert.match(source, /@match\s+https:\/\/oslermedicina\.com\.br\/\*/);
   assert.match(source, /@match\s+https:\/\/\*\.oslermedicina\.com\.br\/\*/);
   assert.match(source, /@updateURL\s+https:\/\/leonardolealluz183-bit\.github\.io\/osler-anki-bridge\/osler-anki-bridge\.user\.js/);
