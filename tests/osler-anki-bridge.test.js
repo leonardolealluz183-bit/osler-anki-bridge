@@ -4,10 +4,22 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 global.Node = { DOCUMENT_POSITION_FOLLOWING: 4 };
+global.innerWidth = 1600;
+global.innerHeight = 900;
+
 const bridge = require('../userscript/osler-anki-bridge.user.js');
 const noDom = { createElement() { return null; } };
 
-function visible(order, tag, text) {
+function visible(order, tag, text, rect = {}) {
+  const box = {
+    top: 180,
+    left: 100,
+    right: 1000,
+    bottom: 240,
+    width: 900,
+    height: 60,
+    ...rect,
+  };
   return {
     order,
     tagName: tag.toUpperCase(),
@@ -17,47 +29,58 @@ function visible(order, tag, text) {
     parentElement: null,
     innerHTML: text,
     outerHTML: `<${tag}>${text}</${tag}>`,
-    getClientRects() { return [1]; },
-    getBoundingClientRect() { return { top: 200 }; },
+    getClientRects() { return [box]; },
+    getBoundingClientRect() { return box; },
     compareDocumentPosition(other) { return this.order < other.order ? 4 : 2; },
-    closest(selector) {
-      if (selector.startsWith('#')) return null;
-      if (selector === 'div.osler-card-explanation') return null;
-      return null;
-    },
+    closest() { return null; },
     contains() { return false; },
     querySelector() { return null; },
     querySelectorAll() { return []; },
   };
 }
 
-function noExplanationCardDocument() {
-  const strong = { textContent: 'Obstrução Intestinal.', innerHTML: 'Obstrução Intestinal.' };
-  const question = visible(1, 'p', 'Obstrução Intestinal. Quanto à etiologia, é classificada como:');
-  question.innerHTML = '<strong>Obstrução Intestinal.</strong> Quanto à etiologia, é classificada como:';
-  question.querySelector = (selector) => selector === 'strong' ? strong : null;
-  question.cloneNode = () => ({
-    textContent: question.textContent,
-    innerHTML: question.innerHTML,
-    querySelectorAll() { return []; },
-    querySelector(selector) {
-      if (selector !== 'strong') return null;
-      return { remove() {} };
-    },
-  });
+function questionNode(text, topic) {
+  const strong = { textContent: `${topic}.`, innerHTML: `${topic}.` };
+  const question = visible(1, 'p', text);
+  question.innerHTML = `<strong>${topic}.</strong>${text.slice(text.indexOf('.') + 1)}`;
+  question.querySelector = (selector) => {
+    if (selector === 'strong') return strong;
+    return null;
+  };
+  question.cloneNode = () => {
+    const clone = {
+      textContent: question.textContent,
+      innerHTML: question.innerHTML,
+      outerHTML: `<p>${question.innerHTML}</p>`,
+      querySelectorAll() { return []; },
+      querySelector(selector) {
+        if (selector !== 'strong') return null;
+        return { remove() {} };
+      },
+    };
+    return clone;
+  };
+  return question;
+}
 
+function noExplanationCardDocument() {
+  const question = questionNode(
+    'Obstrução Intestinal. Quanto à etiologia, é classificada como:',
+    'Obstrução Intestinal',
+  );
   const first = visible(2.1, 'li', 'Mecânica, ou');
   const second = visible(2.2, 'li', 'Funcional.');
-  const list = visible(2, 'ul', 'Mecânica, ou Funcional.');
+  const list = visible(2, 'ul', 'Mecânica, ou Funcional.', { top: 260, bottom: 360, height: 100 });
   list.innerHTML = '<li>Mecânica, ou</li><li>Funcional.</li>';
   list.outerHTML = `<ul>${list.innerHTML}</ul>`;
   list.querySelectorAll = (selector) => selector === 'li' ? [first, second] : [];
 
-  const citation = visible(3, 'p', 'Etiologies and diagnosis of obstruction in adults, em UpToDate.');
+  const citation = visible(3, 'p', 'Etiologies and diagnosis of obstruction in adults, em UpToDate.', { top: 500, bottom: 540, height: 40 });
   const root = {
     parentElement: null,
     querySelectorAll(selector) {
-      return selector === 'p,ul,ol,table,blockquote' ? [question, list, citation] : [];
+      if (selector === 'p,ul,ol,table,blockquote') return [question, list, citation];
+      return [];
     },
   };
   question.parentElement = root;
@@ -66,6 +89,7 @@ function noExplanationCardDocument() {
 
   const documentRef = {
     body: {},
+    documentElement: { clientWidth: 1600, clientHeight: 900 },
     querySelectorAll(selector) {
       if (selector === 'p') return [question, citation];
       if (selector === 'div.osler-card-explanation') return [];
@@ -75,6 +99,64 @@ function noExplanationCardDocument() {
     createTextNode(text) { return text; },
   };
   return { documentRef, question };
+}
+
+function bodyClozeDocument(answer) {
+  const stem = 'Hipertensão Arterial. Antes de aferir a pressão arterial, deve-se perguntar ao paciente se:';
+  const question = questionNode(stem, 'Hipertensão Arterial');
+  const cloze = visible(2.2, 'span', answer, { top: 310, bottom: 335, height: 25, width: 300, right: 400 });
+  cloze.innerHTML = answer;
+
+  const list = visible(2, 'ul', `Está com a bexiga cheia; ${answer}; Ingeriu café.`, { top: 260, bottom: 390, height: 130 });
+  list.innerHTML = `<li>Está com a bexiga cheia</li><li><span class="cloze-answer">${answer}</span></li><li>Ingeriu café</li>`;
+  list.outerHTML = `<ul>${list.innerHTML}</ul>`;
+  list.contains = (node) => node === cloze;
+  list.querySelectorAll = (selector) => selector === 'li' ? [] : [];
+  list.cloneNode = () => {
+    const clone = {
+      textContent: `Está com a bexiga cheia; ${answer}; Ingeriu café.`,
+      innerHTML: list.innerHTML,
+      outerHTML: list.outerHTML,
+      querySelectorAll(selector) {
+        if (!selector.includes('cloze-answer')) return [];
+        return [{
+          replaceWith() {
+            clone.textContent = 'Está com a bexiga cheia; [...]; Ingeriu café.';
+            clone.innerHTML = '<li>Está com a bexiga cheia</li><li>[...]</li><li>Ingeriu café</li>';
+            clone.outerHTML = `<ul>${clone.innerHTML}</ul>`;
+          },
+        }];
+      },
+    };
+    return clone;
+  };
+
+  const citation = visible(3, 'p', 'Diretriz Brasileira de Hipertensão Arterial, em SBC.', { top: 520, bottom: 560, height: 40 });
+  const root = {
+    parentElement: null,
+    querySelectorAll(selector) {
+      if (selector === 'p,ul,ol,table,blockquote') return [question, list, citation];
+      if (selector.includes('cloze-answer')) return [cloze];
+      return [];
+    },
+  };
+  question.parentElement = root;
+  list.parentElement = root;
+  cloze.parentElement = list;
+  citation.parentElement = root;
+
+  const documentRef = {
+    body: {},
+    documentElement: { clientWidth: 1600, clientHeight: 900 },
+    querySelectorAll(selector) {
+      if (selector === 'p') return [question, citation];
+      if (selector === 'div.osler-card-explanation') return [];
+      return [];
+    },
+    createElement() { return null; },
+    createTextNode(text) { return text; },
+  };
+  return documentRef;
 }
 
 test('extracts list answer when the card has no explanation block', () => {
@@ -89,7 +171,31 @@ test('extracts list answer when the card has no explanation block', () => {
   assert.equal(bridge.validateCard(card).valid, true);
 });
 
-test('excludes citation paragraphs from answer candidates', () => {
+test('body clozes create distinct cards for the same stem', () => {
+  const firstDocument = bodyClozeDocument('Fumou há menos de 30 minutos');
+  global.document = firstDocument;
+  const first = bridge.extractCard(firstDocument);
+
+  const secondDocument = bodyClozeDocument('Praticou exercício físico há menos de 90 minutos');
+  global.document = secondDocument;
+  const second = bridge.extractCard(secondDocument);
+
+  assert.equal(first.answer.source, 'body-cloze');
+  assert.equal(second.answer.source, 'body-cloze');
+  assert.match(first.question.text, /\[\.\.\.\]/);
+  assert.notEqual(first.answer.text, second.answer.text);
+  assert.notEqual(first.id, second.id);
+});
+
+test('keyboard shortcuts map 1 to Errei and 2 to Difícil', () => {
+  const body = { tagName: 'BODY', closest() { return null; } };
+  assert.equal(bridge.keyTriggerForEvent({ key: '1', target: body }), 'Errei');
+  assert.equal(bridge.keyTriggerForEvent({ key: '2', target: body }), 'Difícil');
+  assert.equal(bridge.keyTriggerForEvent({ key: ' ', target: body }), null);
+  assert.equal(bridge.keyTriggerForEvent({ key: '1', target: { tagName: 'INPUT' } }), null);
+});
+
+test('excludes citation paragraphs from answers', () => {
   assert.equal(bridge.isCitationText('Etiologies and diagnosis, em UpToDate.'), true);
   assert.equal(bridge.isCitationText('Mecânica, ou funcional.'), false);
 });
@@ -109,10 +215,11 @@ test('rejects verdict-only cards without answers', () => {
   assert.equal(result.valid, false);
 });
 
-test('source and published copy are identical at v0.4.3', () => {
+test('source and published copy are identical at v0.4.4', () => {
   const source = fs.readFileSync(path.join(__dirname, '../userscript/osler-anki-bridge.user.js'), 'utf8');
   const published = fs.readFileSync(path.join(__dirname, '../docs/osler-anki-bridge.user.js'), 'utf8');
   assert.equal(source, published);
-  assert.match(source, /@version\s+0\.4\.3/);
+  assert.match(source, /@version\s+0\.4\.4/);
+  assert.match(source, /Atalhos: Espaço mostra · 1 Errei · 2 Difícil/);
   assert.doesNotMatch(source.split('// ==/UserScript==')[1] || '', /\bfetch\s*\(|XMLHttpRequest|GM_xmlhttpRequest/);
 });
