@@ -1,8 +1,8 @@
 {
   "name": "osler-anki-bridge",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "private": true,
-  "description": "Captura robusta de cards da Osler com fila persistente e exportação TSV para o AnkiDroid.",
+  "description": "Captura cards da Osler com e sem bloco de explicação, mantém fila persistente e exporta TSV para o AnkiDroid.",
   "scripts": {
     "test": "node --test",
     "lint": "node --check userscript/osler-anki-bridge.user.js && node --check docs/osler-anki-bridge.user.js && node --check tests/osler-anki-bridge.test.js"
