@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Osler Anki Bridge
 // @namespace    https://github.com/osler-anki-bridge/osler-anki-bridge
-// @version      0.4.4
-// @description  Captura seletiva de cards da Osler com atalhos 1/2, fila persistente, auditoria e exportação TSV.
+// @version      0.4.5
+// @description  Captura seletiva de cards da Osler com atalhos 1/2, fila persistente, auditoria e relatório em modo leve.
 // @match        https://oslermedicina.com.br/*
 // @match        https://*.oslermedicina.com.br/*
 // @grant        none
@@ -14,11 +14,11 @@
 (function bootstrap(global) {
   'use strict';
 
-  const VERSION = '0.4.4';
+  const VERSION = '0.4.5';
   const QUEUE_KEY = 'oslerAnkiBridge.queue.v1';
   const AUDIT_KEY = 'oslerAnkiBridge.audit.v1';
   const EXPORT_DECK = 'Osler';
-  const PANEL_ID = 'osler-anki-bridge-v044';
+  const PANEL_ID = 'osler-anki-bridge-v045';
   const CLOZE_SELECTOR = '.cloze-answer,[class*="cloze-answer"],[class*="ClozeAnswer"],[class*="clozeAnswer"]';
   const SENSITIVE_QUERY_PARAM = /^(token|access_token|auth|authorization|signature|sig|key|jwt)$/i;
   const boundButtons = typeof WeakSet === 'function' ? new WeakSet() : new Set();
@@ -29,6 +29,10 @@
   let lastGesture = { trigger: '', at: 0 };
   let suppressButtonCaptureUntil = 0;
   let sessionStats = { added: 0, duplicate: 0, failed: 0 };
+  let captureObserver = null;
+  let globalListenersInstalled = false;
+  let bindScheduled = false;
+  let lastKnownPath = '';
 
   const now = () => new Date().toISOString();
   const normalizeWhitespace = (value) => String(value || '').replace(/\s+/g, ' ').trim();
@@ -50,6 +54,13 @@
       hash = Math.imul(hash, 16777619);
     }
     return (hash >>> 0).toString(36);
+  }
+
+  function pageMode(locationRef = global.location) {
+    const pathname = String(locationRef?.pathname || '').replace(/\/+$/, '');
+    if (pathname.endsWith('/test/report')) return 'report';
+    if (pathname.endsWith('/test')) return 'test';
+    return 'idle';
   }
 
   function isVerdictOnly(value) {
@@ -385,6 +396,7 @@
   }
 
   function extractCard(documentRef = global.document) {
+    if (pageMode() !== 'test') return null;
     const questionElement = findQuestionElement(documentRef);
     if (!questionElement) return null;
     const explanationElement = findExplanationForQuestion(questionElement, documentRef);
@@ -514,6 +526,11 @@
   }
 
   function capture(trigger, documentRef = global.document) {
+    if (pageMode() !== 'test') {
+      setMessage('Captura pausada nesta página. Volte à tela do card.', 'failed');
+      return { status: 'failed', card: null, reasons: ['fora da tela de teste'] };
+    }
+
     const card = extractCard(documentRef);
     const validation = validateCard(card);
     if (!validation.valid) {
@@ -579,6 +596,7 @@
   }
 
   function captureGesture(trigger, documentRef, source = 'button') {
+    if (pageMode() !== 'test') return null;
     const timestamp = Date.now();
     if (source === 'button' && timestamp < suppressButtonCaptureUntil) return null;
     if (lastGesture.trigger === trigger && timestamp - lastGesture.at < 700) return null;
@@ -605,6 +623,7 @@
   }
 
   function bindButtons(documentRef = global.document) {
+    if (pageMode() !== 'test') return;
     Array.from(documentRef.querySelectorAll?.('button,[role="button"]') || []).forEach((button) => {
       const trigger = ratingTrigger(button);
       if (!trigger || boundButtons.has(button)) return;
@@ -616,8 +635,29 @@
     });
   }
 
-  function installListeners(documentRef = global.document) {
+  function scheduleBindButtons(documentRef = global.document) {
+    if (bindScheduled || pageMode() !== 'test') return;
+    bindScheduled = true;
+    const run = () => {
+      bindScheduled = false;
+      if (pageMode() === 'test') bindButtons(documentRef);
+    };
+    if (typeof global.requestAnimationFrame === 'function') global.requestAnimationFrame(run);
+    else global.setTimeout?.(run, 50);
+  }
+
+  function disconnectCaptureObserver() {
+    captureObserver?.disconnect?.();
+    captureObserver = null;
+    bindScheduled = false;
+  }
+
+  function ensureGlobalListeners(documentRef = global.document) {
+    if (globalListenersInstalled) return;
+    globalListenersInstalled = true;
+
     documentRef.addEventListener('keydown', (event) => {
+      if (pageMode() !== 'test') return;
       const trigger = keyTriggerForEvent(event);
       if (!trigger) return;
       suppressButtonCaptureUntil = Date.now() + 800;
@@ -626,6 +666,7 @@
 
     ['touchstart', 'pointerdown', 'click'].forEach((type) => {
       documentRef.addEventListener(type, (event) => {
+        if (pageMode() !== 'test') return;
         const path = event.composedPath?.() || [event.target];
         for (const node of path) {
           const trigger = ratingTrigger(node);
@@ -636,12 +677,42 @@
         }
       }, true);
     });
+  }
 
+  function activateCaptureMode(documentRef = global.document) {
+    ensureGlobalListeners(documentRef);
+    if (captureObserver || pageMode() !== 'test') return;
     bindButtons(documentRef);
     if (typeof global.MutationObserver === 'function') {
-      const observer = new global.MutationObserver(() => bindButtons(documentRef));
-      observer.observe(documentRef.body, { childList: true, subtree: true });
+      captureObserver = new global.MutationObserver(() => {
+        if (pageMode() !== 'test') {
+          disconnectCaptureObserver();
+          renderPanel();
+          return;
+        }
+        scheduleBindButtons(documentRef);
+      });
+      captureObserver.observe(documentRef.body, { childList: true, subtree: true });
     }
+  }
+
+  function syncPageMode(documentRef = global.document) {
+    const mode = pageMode();
+    if (mode === 'test') activateCaptureMode(documentRef);
+    else disconnectCaptureObserver();
+    renderPanel();
+  }
+
+  function installRouteWatcher(documentRef = global.document) {
+    lastKnownPath = String(global.location?.pathname || '');
+    global.setInterval?.(() => {
+      const currentPath = String(global.location?.pathname || '');
+      if (currentPath === lastKnownPath) return;
+      lastKnownPath = currentPath;
+      syncPageMode(documentRef);
+    }, 1000);
+    global.addEventListener?.('popstate', () => global.setTimeout?.(() => syncPageMode(documentRef), 0));
+    global.addEventListener?.('hashchange', () => global.setTimeout?.(() => syncPageMode(documentRef), 0));
   }
 
   function tsvField(value) {
@@ -675,16 +746,18 @@
   }
 
   function downloadTextFile(documentRef, contents, filename, mimeType) {
-    const file = new File([contents], filename, { type: mimeType });
-    const url = global.URL.createObjectURL(file);
+    const blob = new Blob([contents], { type: mimeType });
+    const url = global.URL.createObjectURL(blob);
     const anchor = documentRef.createElement('a');
     anchor.href = url;
-    anchor.download = file.name;
+    anchor.download = filename;
+    anchor.rel = 'noopener';
+    anchor.style.display = 'none';
     documentRef.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
-    global.setTimeout?.(() => global.URL.revokeObjectURL(url), 1000);
-    return file;
+    global.setTimeout?.(() => global.URL.revokeObjectURL(url), 60000);
+    return { blob, filename };
   }
 
   function downloadTsv(documentRef = global.document) {
@@ -692,13 +765,14 @@
       setMessage('A fila está vazia.', 'failed');
       return null;
     }
+    const filename = `osler-anki-${Date.now()}.tsv`;
     const file = downloadTextFile(
       documentRef,
       buildTsv(documentRef),
-      `osler-anki-${Date.now()}.tsv`,
+      filename,
       'text/tab-separated-values;charset=utf-8',
     );
-    setMessage(`TSV baixado com ${queue.length} card(s).`, 'added');
+    setMessage(`Download solicitado: ${filename} · ${queue.length} card(s).`, 'added');
     return file;
   }
 
@@ -710,26 +784,36 @@
       sessionStats,
       events: audit,
     };
+    const filename = `osler-anki-diagnostico-${Date.now()}.json`;
     const file = downloadTextFile(
       documentRef,
       `${JSON.stringify(payload, null, 2)}\n`,
-      `osler-anki-diagnostico-${Date.now()}.json`,
+      filename,
       'application/json;charset=utf-8',
     );
-    setMessage(`Diagnóstico baixado com ${audit.length} evento(s).`, 'added');
+    setMessage(`Download solicitado: ${filename} · ${audit.length} evento(s).`, 'added');
     return file;
   }
 
   function renderPanel() {
     if (!panel) return;
+    const mode = pageMode();
     panel.querySelector('[data-role="status"]').textContent = `${queue.length} card(s) na fila para o AnkiDroid`;
     panel.querySelector('[data-role="session"]').textContent = `Nesta sessão: ${sessionStats.added} adicionados · ${sessionStats.duplicate} duplicados · ${sessionStats.failed} falhas`;
+    panel.querySelector('[data-role="mode"]').textContent = mode === 'test'
+      ? 'Captura ativa: Espaço mostra · 1 Errei · 2 Difícil'
+      : mode === 'report'
+        ? 'Modo leve de exportação: captura e varredura desligadas nesta tela.'
+        : 'Modo leve: abra um teste para ativar a captura.';
+    const captureButton = panel.querySelector('[data-action="capture"]');
+    if (captureButton) captureButton.disabled = mode !== 'test';
   }
 
   function install(documentRef = global.document) {
     if (!documentRef.body || documentRef.getElementById(PANEL_ID)) return;
-    documentRef.getElementById('osler-anki-bridge-v042')?.remove?.();
-    documentRef.getElementById('osler-anki-bridge-v043')?.remove?.();
+    ['osler-anki-bridge-v042', 'osler-anki-bridge-v043', 'osler-anki-bridge-v044'].forEach((id) => {
+      documentRef.getElementById(id)?.remove?.();
+    });
     queue = loadQueue();
     audit = loadAudit();
     panel = documentRef.createElement('section');
@@ -741,7 +825,7 @@
       <button data-action="capture">Adicionar card atual</button>
       <button data-action="download">Baixar TSV</button>
       <button data-action="audit">Baixar log</button>
-      <div style="margin-top:6px">Atalhos: Espaço mostra · 1 Errei · 2 Difícil</div>
+      <div data-role="mode" style="margin-top:6px"></div>
       <div data-role="message" style="margin-top:5px;max-width:360px;overflow-wrap:anywhere"></div>
     `;
     panel.style.cssText = 'position:fixed;right:12px;top:12px;z-index:2147483647;background:#fff;color:#111;border:1px solid #999;border-radius:10px;padding:10px;font:12px system-ui;max-width:380px';
@@ -749,8 +833,9 @@
     panel.querySelector('[data-action="download"]').addEventListener('click', () => downloadTsv(documentRef));
     panel.querySelector('[data-action="audit"]').addEventListener('click', () => downloadAudit(documentRef));
     documentRef.body.appendChild(panel);
-    installListeners(documentRef);
-    renderPanel();
+    ensureGlobalListeners(documentRef);
+    installRouteWatcher(documentRef);
+    syncPageMode(documentRef);
   }
 
   const api = {
@@ -764,12 +849,13 @@
     findQuestionElement,
     isCitationText,
     keyTriggerForEvent,
+    pageMode,
     sanitizeHtml,
     stableHash,
     validateCard,
     visibilityMetrics,
   };
-  global.OslerAnkiBridgeV044 = api;
+  global.OslerAnkiBridgeV045 = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else install();
 })(typeof globalThis !== 'undefined' ? globalThis : window);
