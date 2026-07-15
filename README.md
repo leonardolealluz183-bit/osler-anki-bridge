@@ -1,14 +1,31 @@
 # Osler Anki Bridge
 
-Fase 1 Android-only para capturar e diagnosticar conteúdo de páginas Osler por meio de userscript, sem envio de dados e sem integração com AnkiDroid ou aplicativo Android.
+Fase 1 Android-only para capturar e diagnosticar cards da Osler por meio de userscript, sem envio de dados e sem integração com AnkiDroid ou aplicativo Android.
+
+## Versão 0.3.0
+
+A extração na página real da Osler é automática:
+
+- localiza a pergunta a partir de `div.osler-card-explanation`;
+- extrai o assunto do primeiro `<strong>` da pergunta;
+- substitui respostas reveladas `.cloze-answer` por `[...]` na versão da pergunta;
+- preserva também a pergunta revelada;
+- captura um ou vários clozes como resposta;
+- captura todos os parágrafos da explicação;
+- detecta **Errei** e **Difícil** pelo texto do botão, sem seletores frágeis;
+- ignora **Acertei**.
+
+A calibração manual permanece disponível somente como fallback de diagnóstico.
 
 ## Conteúdo do repositório
 
-- `userscript/osler-anki-bridge.user.js`: userscript de captura, calibração visual e painel JSON/logs.
-- `demo/index.html`: página simulada para calibrar pergunta, resposta, explicação, assunto/deck e botões Errei/Difícil.
-- `tests/osler-anki-bridge.test.js`: testes automatizados dos requisitos da Fase 1.
-- `docs/android-only.md`: documentação do escopo Android-only sem Fase 2 e sem integração com AnkiDroid.
-- `.github/workflows/pages.yml`: workflow para publicar a demo estática no GitHub Pages.
+- `userscript/osler-anki-bridge.user.js`: código-fonte do userscript.
+- `docs/osler-anki-bridge.user.js`: cópia publicada pelo GitHub Pages.
+- `docs/index.html`: página simulada da estrutura real da Osler.
+- `tests/osler-anki-bridge.test.js`: testes automatizados da extração.
+- `docs/android-only.md`: instruções e limites da Fase 1.
+
+O GitHub Pages deve ser configurado para publicar diretamente da branch `main`, pasta `/docs`.
 
 ## Desenvolvimento
 
@@ -19,4 +36,4 @@ npm run lint
 
 ## Fora do escopo
 
-Este repositório não implementa Fase 2, Android Intent, envio direto ao AnkiDroid, backend, sincronização em nuvem nem aplicativo Android nativo.
+Este repositório ainda não implementa Fase 2, Android Intent, envio direto ao AnkiDroid, backend, sincronização em nuvem nem aplicativo Android nativo.
