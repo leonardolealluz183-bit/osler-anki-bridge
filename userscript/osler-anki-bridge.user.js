@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Osler Anki Bridge
 // @namespace    https://github.com/osler-anki-bridge/osler-anki-bridge
-// @version      0.4.5
-// @description  Captura seletiva de cards da Osler com atalhos 1/2, fila persistente, auditoria e relatório em modo leve.
+// @version      0.4.6
+// @description  Captura transacional de cards da Osler: salva antes de avançar, com atalhos 1/2, auditoria e exportação TSV.
 // @match        https://oslermedicina.com.br/*
 // @match        https://*.oslermedicina.com.br/*
 // @grant        none
@@ -14,25 +14,24 @@
 (function bootstrap(global) {
   'use strict';
 
-  const VERSION = '0.4.5';
+  const VERSION = '0.4.6';
   const QUEUE_KEY = 'oslerAnkiBridge.queue.v1';
   const AUDIT_KEY = 'oslerAnkiBridge.audit.v1';
   const EXPORT_DECK = 'Osler';
-  const PANEL_ID = 'osler-anki-bridge-v045';
+  const PANEL_ID = 'osler-anki-bridge-v046';
   const CLOZE_SELECTOR = '.cloze-answer,[class*="cloze-answer"],[class*="ClozeAnswer"],[class*="clozeAnswer"]';
   const SENSITIVE_QUERY_PARAM = /^(token|access_token|auth|authorization|signature|sig|key|jwt)$/i;
-  const boundButtons = typeof WeakSet === 'function' ? new WeakSet() : new Set();
+  const CAPTURE_RETRY_MS = 60;
+  const CAPTURE_TIMEOUT_MS = 2200;
 
   let queue = [];
   let audit = [];
   let panel = null;
-  let lastGesture = { trigger: '', at: 0 };
-  let suppressButtonCaptureUntil = 0;
   let sessionStats = { added: 0, duplicate: 0, failed: 0 };
-  let captureObserver = null;
   let globalListenersInstalled = false;
-  let bindScheduled = false;
   let lastKnownPath = '';
+  let ratingTransaction = null;
+  let syntheticRatingUntil = 0;
 
   const now = () => new Date().toISOString();
   const normalizeWhitespace = (value) => String(value || '').replace(/\s+/g, ' ').trim();
@@ -448,10 +447,15 @@
   function validateCard(card) {
     const question = normalizeWhitespace(card?.question?.text);
     const answer = normalizeWhitespace(card?.answer?.text);
+    const answerHtml = String(card?.answer?.html || '');
+    const answerSource = String(card?.answer?.source || '');
     const topic = normalizeWhitespace(card?.topic?.text);
     const reasons = [];
     if (!question) reasons.push('pergunta vazia');
-    if (!answer && !/<(img|li|ul|ol|table)\b/i.test(String(card?.answer?.html || ''))) reasons.push('resposta vazia');
+    if (!answer && !/<(img|li|ul|ol|table)\b/i.test(answerHtml)) reasons.push('resposta vazia');
+    if (!answerSource.includes('cloze') && (answer.includes('[...]') || answerHtml.includes('[...]'))) {
+      reasons.push('resposta ainda não revelada');
+    }
     if (isVerdictOnly(question)) reasons.push('pergunta é só um veredito');
     if (isVerdictOnly(topic)) reasons.push('assunto é só um veredito');
     return { valid: reasons.length === 0, reasons };
@@ -476,7 +480,7 @@
   }
 
   function loadAudit() {
-    return readStoredArray(AUDIT_KEY).slice(-300);
+    return readStoredArray(AUDIT_KEY).slice(-500);
   }
 
   function saveQueue() {
@@ -485,7 +489,7 @@
   }
 
   function saveAudit() {
-    global.localStorage?.setItem?.(AUDIT_KEY, JSON.stringify(audit.slice(-300)));
+    global.localStorage?.setItem?.(AUDIT_KEY, JSON.stringify(audit.slice(-500)));
     renderPanel();
   }
 
@@ -515,7 +519,7 @@
       url: scrubSensitiveUrl(global.location?.href || ''),
     };
     audit.push(entry);
-    audit = audit.slice(-300);
+    audit = audit.slice(-500);
     if (Object.prototype.hasOwnProperty.call(sessionStats, status)) sessionStats[status] += 1;
     saveAudit();
     return entry;
@@ -525,20 +529,10 @@
     return shortLabel(findQuestionElement(documentRef)?.textContent);
   }
 
-  function capture(trigger, documentRef = global.document) {
-    if (pageMode() !== 'test') {
-      setMessage('Captura pausada nesta página. Volte à tela do card.', 'failed');
-      return { status: 'failed', card: null, reasons: ['fora da tela de teste'] };
-    }
-
-    const card = extractCard(documentRef);
+  function commitCard(card, trigger) {
     const validation = validateCard(card);
     if (!validation.valid) {
-      const question = visibleQuestionLabel(documentRef);
-      const detail = validation.reasons.join(', ') || 'card não identificado';
-      recordAudit('failed', trigger, card, detail);
-      setMessage(`FALHOU — ${question} — ${detail}`, 'failed');
-      return { status: 'failed', card: null, reasons: validation.reasons };
+      return { status: 'not-ready', card: null, reasons: validation.reasons };
     }
 
     const copy = JSON.parse(JSON.stringify(card));
@@ -553,9 +547,26 @@
 
     queue.push(copy);
     saveQueue();
-    recordAudit('added', trigger, copy, 'adicionado à fila');
-    setMessage(`ADICIONADO — ${shortLabel(copy.question.text)}`, 'added');
+    recordAudit('added', trigger, copy, 'adicionado à fila antes de avançar');
+    setMessage(`SALVO — ${shortLabel(copy.question.text)}`, 'added');
     return { status: 'added', card: copy, reasons: [] };
+  }
+
+  function capture(trigger, documentRef = global.document) {
+    if (pageMode() !== 'test') {
+      setMessage('Captura pausada nesta página. Volte à tela do card.', 'failed');
+      return { status: 'failed', card: null, reasons: ['fora da tela de teste'] };
+    }
+
+    const card = extractCard(documentRef);
+    const result = commitCard(card, trigger);
+    if (result.status !== 'not-ready') return result;
+
+    const question = visibleQuestionLabel(documentRef);
+    const detail = result.reasons.join(', ') || 'card não identificado';
+    recordAudit('failed', trigger, card, detail);
+    setMessage(`FALHOU — ${question} — ${detail}`, 'failed');
+    return { status: 'failed', card: null, reasons: result.reasons };
   }
 
   function triggerForButton(element) {
@@ -595,13 +606,90 @@
     return null;
   }
 
-  function captureGesture(trigger, documentRef, source = 'button') {
-    if (pageMode() !== 'test') return null;
-    const timestamp = Date.now();
-    if (source === 'button' && timestamp < suppressButtonCaptureUntil) return null;
-    if (lastGesture.trigger === trigger && timestamp - lastGesture.at < 700) return null;
-    lastGesture = { trigger, at: timestamp };
-    return capture(`${source === 'keyboard' ? 'tecla' : 'botão'} ${trigger}`, documentRef);
+  function findRatingButton(trigger, documentRef = global.document) {
+    return Array.from(documentRef.querySelectorAll?.('button,[role="button"]') || [])
+      .filter((button) => isVisible(button) && ratingTrigger(button) === trigger)
+      .sort((first, second) => {
+        const firstMetrics = visibilityMetrics(first);
+        const secondMetrics = visibilityMetrics(second);
+        return (secondMetrics.ratio - firstMetrics.ratio)
+          || (firstMetrics.centerDistance - secondMetrics.centerDistance);
+      })[0] || null;
+  }
+
+  function finishNativeRating(trigger, documentRef, preferredButton = null) {
+    const button = preferredButton && preferredButton.isConnected && isVisible(preferredButton)
+      ? preferredButton
+      : findRatingButton(trigger, documentRef);
+    if (!button) {
+      setMessage(`SALVO, MAS NÃO AVANÇOU — botão ${trigger} não encontrado.`, 'failed');
+      return false;
+    }
+
+    syntheticRatingUntil = Date.now() + 1200;
+    button.click();
+    return true;
+  }
+
+  function startRatingTransaction(trigger, documentRef = global.document, source = 'keyboard', preferredButton = null) {
+    if (pageMode() !== 'test') return Promise.resolve({ status: 'failed', reasons: ['fora da tela de teste'] });
+    if (ratingTransaction) {
+      setMessage('AGUARDE — o card anterior ainda está sendo salvo.', 'waiting');
+      return ratingTransaction.promise;
+    }
+
+    const startedAt = Date.now();
+    const questionAtStart = visibleQuestionLabel(documentRef);
+    let resolveTransaction;
+    const promise = new Promise((resolve) => { resolveTransaction = resolve; });
+    ratingTransaction = { trigger, source, startedAt, promise };
+    renderPanel();
+    setMessage(`AGUARDANDO RESPOSTA — ${questionAtStart}`, 'waiting');
+
+    const attempt = () => {
+      if (!ratingTransaction || ratingTransaction.startedAt !== startedAt) return;
+      if (pageMode() !== 'test') {
+        const detail = 'a tela mudou antes da captura';
+        recordAudit('failed', `${source === 'keyboard' ? 'tecla' : 'botão'} ${trigger}`, null, detail);
+        ratingTransaction = null;
+        renderPanel();
+        setMessage(`NÃO AVANÇOU — ${detail}.`, 'failed');
+        resolveTransaction({ status: 'failed', reasons: [detail] });
+        return;
+      }
+
+      const card = extractCard(documentRef);
+      const validation = validateCard(card);
+      if (validation.valid) {
+        const auditTrigger = `${source === 'keyboard' ? 'tecla' : 'botão'} ${trigger}`;
+        const result = commitCard(card, auditTrigger);
+        ratingTransaction = null;
+        renderPanel();
+        if (result.status === 'added' || result.status === 'duplicate') {
+          const advanced = finishNativeRating(trigger, documentRef, preferredButton);
+          resolveTransaction({ ...result, advanced });
+          return;
+        }
+        resolveTransaction(result);
+        return;
+      }
+
+      if (Date.now() - startedAt >= CAPTURE_TIMEOUT_MS) {
+        const detail = validation.reasons.join(', ') || 'resposta não apareceu';
+        const auditTrigger = `${source === 'keyboard' ? 'tecla' : 'botão'} ${trigger}`;
+        recordAudit('failed', auditTrigger, card, `bloqueado sem avançar: ${detail}`);
+        ratingTransaction = null;
+        renderPanel();
+        setMessage(`NÃO AVANÇOU — ${questionAtStart} — ${detail}. Mostre a resposta e tente novamente.`, 'failed');
+        resolveTransaction({ status: 'failed', card: null, reasons: validation.reasons, advanced: false });
+        return;
+      }
+
+      global.setTimeout?.(attempt, CAPTURE_RETRY_MS);
+    };
+
+    attempt();
+    return promise;
   }
 
   function isEditableTarget(target) {
@@ -622,97 +710,57 @@
     return null;
   }
 
-  function bindButtons(documentRef = global.document) {
-    if (pageMode() !== 'test') return;
-    Array.from(documentRef.querySelectorAll?.('button,[role="button"]') || []).forEach((button) => {
-      const trigger = ratingTrigger(button);
-      if (!trigger || boundButtons.has(button)) return;
-      boundButtons.add(button);
-      const handler = () => captureGesture(trigger, documentRef, 'button');
-      button.addEventListener('touchstart', handler, true);
-      button.addEventListener('pointerdown', handler, true);
-      button.addEventListener('click', handler, true);
-    });
-  }
-
-  function scheduleBindButtons(documentRef = global.document) {
-    if (bindScheduled || pageMode() !== 'test') return;
-    bindScheduled = true;
-    const run = () => {
-      bindScheduled = false;
-      if (pageMode() === 'test') bindButtons(documentRef);
-    };
-    if (typeof global.requestAnimationFrame === 'function') global.requestAnimationFrame(run);
-    else global.setTimeout?.(run, 50);
-  }
-
-  function disconnectCaptureObserver() {
-    captureObserver?.disconnect?.();
-    captureObserver = null;
-    bindScheduled = false;
+  function blockEvent(event) {
+    event.preventDefault?.();
+    event.stopPropagation?.();
+    event.stopImmediatePropagation?.();
   }
 
   function ensureGlobalListeners(documentRef = global.document) {
     if (globalListenersInstalled) return;
     globalListenersInstalled = true;
 
-    documentRef.addEventListener('keydown', (event) => {
+    const keyboardHandler = (event) => {
       if (pageMode() !== 'test') return;
       const trigger = keyTriggerForEvent(event);
       if (!trigger) return;
-      suppressButtonCaptureUntil = Date.now() + 800;
-      captureGesture(trigger, documentRef, 'keyboard');
+      blockEvent(event);
+      if (event.type === 'keydown') startRatingTransaction(trigger, documentRef, 'keyboard');
+    };
+
+    global.addEventListener?.('keydown', keyboardHandler, true);
+    global.addEventListener?.('keyup', keyboardHandler, true);
+    documentRef.addEventListener('keydown', keyboardHandler, true);
+    documentRef.addEventListener('keyup', keyboardHandler, true);
+
+    documentRef.addEventListener('click', (event) => {
+      if (pageMode() !== 'test' || Date.now() < syntheticRatingUntil) return;
+      const path = event.composedPath?.() || [event.target];
+      const button = path.find((node) => ratingTrigger(node));
+      const trigger = ratingTrigger(button);
+      if (!trigger) return;
+      blockEvent(event);
+      startRatingTransaction(trigger, documentRef, 'button', button?.closest?.('button,[role="button"]') || button);
     }, true);
-
-    ['touchstart', 'pointerdown', 'click'].forEach((type) => {
-      documentRef.addEventListener(type, (event) => {
-        if (pageMode() !== 'test') return;
-        const path = event.composedPath?.() || [event.target];
-        for (const node of path) {
-          const trigger = ratingTrigger(node);
-          if (trigger) {
-            captureGesture(trigger, documentRef, 'button');
-            break;
-          }
-        }
-      }, true);
-    });
   }
 
-  function activateCaptureMode(documentRef = global.document) {
-    ensureGlobalListeners(documentRef);
-    if (captureObserver || pageMode() !== 'test') return;
-    bindButtons(documentRef);
-    if (typeof global.MutationObserver === 'function') {
-      captureObserver = new global.MutationObserver(() => {
-        if (pageMode() !== 'test') {
-          disconnectCaptureObserver();
-          renderPanel();
-          return;
-        }
-        scheduleBindButtons(documentRef);
-      });
-      captureObserver.observe(documentRef.body, { childList: true, subtree: true });
+  function syncPageMode() {
+    if (pageMode() !== 'test' && ratingTransaction) {
+      ratingTransaction = null;
     }
-  }
-
-  function syncPageMode(documentRef = global.document) {
-    const mode = pageMode();
-    if (mode === 'test') activateCaptureMode(documentRef);
-    else disconnectCaptureObserver();
     renderPanel();
   }
 
-  function installRouteWatcher(documentRef = global.document) {
+  function installRouteWatcher() {
     lastKnownPath = String(global.location?.pathname || '');
     global.setInterval?.(() => {
       const currentPath = String(global.location?.pathname || '');
       if (currentPath === lastKnownPath) return;
       lastKnownPath = currentPath;
-      syncPageMode(documentRef);
+      syncPageMode();
     }, 1000);
-    global.addEventListener?.('popstate', () => global.setTimeout?.(() => syncPageMode(documentRef), 0));
-    global.addEventListener?.('hashchange', () => global.setTimeout?.(() => syncPageMode(documentRef), 0));
+    global.addEventListener?.('popstate', () => global.setTimeout?.(syncPageMode, 0));
+    global.addEventListener?.('hashchange', () => global.setTimeout?.(syncPageMode, 0));
   }
 
   function tsvField(value) {
@@ -782,6 +830,7 @@
       exportedAt: now(),
       queueSize: queue.length,
       sessionStats,
+      transactionActive: Boolean(ratingTransaction),
       events: audit,
     };
     const filename = `osler-anki-diagnostico-${Date.now()}.json`;
@@ -801,17 +850,19 @@
     panel.querySelector('[data-role="status"]').textContent = `${queue.length} card(s) na fila para o AnkiDroid`;
     panel.querySelector('[data-role="session"]').textContent = `Nesta sessão: ${sessionStats.added} adicionados · ${sessionStats.duplicate} duplicados · ${sessionStats.failed} falhas`;
     panel.querySelector('[data-role="mode"]').textContent = mode === 'test'
-      ? 'Captura ativa: Espaço mostra · 1 Errei · 2 Difícil'
+      ? ratingTransaction
+        ? `Salvando antes de avançar: ${ratingTransaction.trigger}…`
+        : 'Captura protegida: Espaço mostra · 1 Errei · 2 Difícil. Só avança depois de salvar.'
       : mode === 'report'
-        ? 'Modo leve de exportação: captura e varredura desligadas nesta tela.'
+        ? 'Modo leve de exportação: captura desligada nesta tela.'
         : 'Modo leve: abra um teste para ativar a captura.';
     const captureButton = panel.querySelector('[data-action="capture"]');
-    if (captureButton) captureButton.disabled = mode !== 'test';
+    if (captureButton) captureButton.disabled = mode !== 'test' || Boolean(ratingTransaction);
   }
 
   function install(documentRef = global.document) {
     if (!documentRef.body || documentRef.getElementById(PANEL_ID)) return;
-    ['osler-anki-bridge-v042', 'osler-anki-bridge-v043', 'osler-anki-bridge-v044'].forEach((id) => {
+    ['osler-anki-bridge-v042', 'osler-anki-bridge-v043', 'osler-anki-bridge-v044', 'osler-anki-bridge-v045'].forEach((id) => {
       documentRef.getElementById(id)?.remove?.();
     });
     queue = loadQueue();
@@ -834,28 +885,31 @@
     panel.querySelector('[data-action="audit"]').addEventListener('click', () => downloadAudit(documentRef));
     documentRef.body.appendChild(panel);
     ensureGlobalListeners(documentRef);
-    installRouteWatcher(documentRef);
-    syncPageMode(documentRef);
+    installRouteWatcher();
+    syncPageMode();
   }
 
   const api = {
     buildTsv,
     capture,
     clozesInCard,
+    commitCard,
     contentCandidates,
     extractCard,
     extractResponse,
     findExplanationForQuestion,
     findQuestionElement,
+    findRatingButton,
     isCitationText,
     keyTriggerForEvent,
     pageMode,
     sanitizeHtml,
     stableHash,
+    startRatingTransaction,
     validateCard,
     visibilityMetrics,
   };
-  global.OslerAnkiBridgeV045 = api;
+  global.OslerAnkiBridgeV046 = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else install();
 })(typeof globalThis !== 'undefined' ? globalThis : window);
