@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Osler Capture Diagnostics
 // @namespace    https://github.com/osler-anki-bridge/osler-anki-bridge
-// @version      0.3.1
+// @version      0.3.2
 // @description  Phase 1 automatic capture diagnostics for Osler cards. No network, AnkiDroid, or app integration.
 // @match        https://oslermedicina.com.br/*
 // @match        https://*.oslermedicina.com.br/*
@@ -25,13 +25,15 @@
   const DANGEROUS_ATTR = /^(on|srcdoc$)/i;
   const URL_ATTR = /^(href|src|xlink:href|formaction)$/i;
   const DANGEROUS_URL = /^\s*(javascript|data):/i;
+  const SENSITIVE_QUERY_PARAM = /^(token|access_token|auth|authorization|signature|sig|key|jwt)$/i;
 
   let calibrationField = null;
   let capturedCards = [];
   let logs = [];
   let config = {};
   let panelRefs = null;
-  let documentListenerInstalled = false;
+  let documentListenersInstalled = false;
+  let lastGesture = { trigger: '', at: 0 };
 
   function now() {
     return new Date().toISOString();
@@ -107,23 +109,53 @@
     return parts.join(' > ');
   }
 
+  function scrubSensitiveUrl(value) {
+    const original = String(value || '').trim();
+    if (!original || DANGEROUS_URL.test(original)) return '';
+
+    try {
+      const base = global.location?.origin || 'https://oslermedicina.com.br';
+      const parsed = new URL(original, base);
+      Array.from(parsed.searchParams.keys()).forEach((key) => {
+        if (SENSITIVE_QUERY_PARAM.test(key)) parsed.searchParams.delete(key);
+      });
+      const isRelative = !/^[a-z][a-z0-9+.-]*:/i.test(original) && !original.startsWith('//');
+      return isRelative
+        ? `${parsed.pathname}${parsed.search}${parsed.hash}`
+        : parsed.toString();
+    } catch (_error) {
+      return original
+        .replace(/([?&])(token|access_token|auth|authorization|signature|sig|key|jwt)=[^&"'\s>]*/gi, '$1')
+        .replace(/[?&]+$/g, '');
+    }
+  }
+
   function sanitizeHtml(html, documentRef = global.document) {
     const template = documentRef?.createElement?.('template');
     if (!template) return String(html || '').trim();
     template.innerHTML = html || '';
+
     if (!template.content?.querySelectorAll) {
       return String(html || '')
         .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
         .replace(/\s+on[a-z]+=(("[^"]*")|('[^']*')|[^\s>]+)/gi, '')
         .replace(/\s+(href|src|xlink:href|formaction)=(("|')?\s*(javascript|data):[^\s>]*(\3)?)/gi, '')
+        .replace(/([?&])(token|access_token|auth|authorization|signature|sig|key|jwt)=[^&"'\s>]*/gi, '$1')
+        .replace(/[?&]+(?=["'\s>])/g, '')
         .trim();
     }
+
     template.content.querySelectorAll('script, iframe, object, embed, link[rel="import"]').forEach((node) => node.remove());
     template.content.querySelectorAll('*').forEach((node) => {
       Array.from(node.attributes).forEach((attr) => {
-        if (DANGEROUS_ATTR.test(attr.name) || (URL_ATTR.test(attr.name) && DANGEROUS_URL.test(attr.value))) {
+        if (DANGEROUS_ATTR.test(attr.name)) {
           node.removeAttribute(attr.name);
+          return;
         }
+        if (!URL_ATTR.test(attr.name)) return;
+        const sanitized = scrubSensitiveUrl(attr.value);
+        if (!sanitized) node.removeAttribute(attr.name);
+        else node.setAttribute(attr.name, sanitized);
       });
     });
     return template.innerHTML.trim();
@@ -335,39 +367,61 @@
       log('captura ignorada: pergunta não encontrada', { trigger });
       return null;
     }
-
     if (capturedCards.some((existing) => existing.id === card.id)) {
       log('captura duplicada ignorada', { id: card.id, trigger });
       return null;
     }
 
     capturedCards.push(card);
-    log('card capturado', { id: card.id, trigger, mode: extractOslerCard(documentRef) ? 'automático' : 'fallback' });
+    log('card capturado', { id: card.id, trigger });
     renderPanel();
     return card;
   }
 
-  function triggerForButton(button) {
-    const text = normalizeButtonText(button?.textContent);
-    if (text.includes('acertei')) return null;
-    if (text.includes('errei')) return 'botão Errei';
-    if (text.includes('dificil')) return 'botão Difícil';
+  function triggerForButton(element) {
+    const text = normalizeButtonText(element?.textContent);
+    if (/(^|\s)acertei(\s|$)/.test(text)) return null;
+    if (/(^|\s)errei(\s|$)/.test(text)) return 'botão Errei';
+    if (/(^|\s)dificil(\s|$)/.test(text)) return 'botão Difícil';
     return null;
   }
 
-  function handleDocumentClick(event, documentRef = global.document) {
+  function findActionElement(target) {
+    const closest = target?.closest?.('button,[role="button"]');
+    if (closest && triggerForButton(closest)) return closest;
+
+    let current = target;
+    for (let depth = 0; current && depth < 5; depth += 1) {
+      const tag = String(current.tagName || '').toLowerCase();
+      const role = current.getAttribute?.('role');
+      if ((tag === 'button' || role === 'button') && triggerForButton(current)) return current;
+      current = current.parentElement;
+    }
+    return null;
+  }
+
+  function handleDocumentAction(event, documentRef = global.document) {
     if (calibrationField) {
       if (!event.target || panelRefs?.root?.contains?.(event.target)) return null;
+      if (event.type !== 'click') return null;
       event.preventDefault?.();
       event.stopPropagation?.();
       finishCalibration(event.target, documentRef);
       return 'calibration';
     }
 
-    const button = event.target?.closest?.('button') || (String(event.target?.tagName || '').toLowerCase() === 'button' ? event.target : null);
-    const trigger = triggerForButton(button);
+    const actionElement = findActionElement(event.target);
+    const trigger = triggerForButton(actionElement);
     if (!trigger) return null;
+
+    const timestamp = Date.now();
+    if (lastGesture.trigger === trigger && timestamp - lastGesture.at < 1000) return null;
+    lastGesture = { trigger, at: timestamp };
     return captureCard(trigger, documentRef);
+  }
+
+  function handleDocumentClick(event, documentRef = global.document) {
+    return handleDocumentAction(event, documentRef);
   }
 
   function startCalibration(field) {
@@ -384,11 +438,16 @@
     return true;
   }
 
-  function installDocumentListener(documentRef = global.document) {
-    if (documentListenerInstalled || !documentRef?.addEventListener) return false;
-    documentRef.addEventListener('click', (event) => handleDocumentClick(event, documentRef), true);
-    documentListenerInstalled = true;
+  function installDocumentListeners(documentRef = global.document) {
+    if (documentListenersInstalled || !documentRef?.addEventListener) return false;
+    documentRef.addEventListener('pointerdown', (event) => handleDocumentAction(event, documentRef), true);
+    documentRef.addEventListener('click', (event) => handleDocumentAction(event, documentRef), true);
+    documentListenersInstalled = true;
     return true;
+  }
+
+  function installDocumentListener(documentRef = global.document) {
+    return installDocumentListeners(documentRef);
   }
 
   function copyText(text) {
@@ -459,7 +518,7 @@
       output: root.querySelector('[data-role="output"]'),
       status: root.querySelector('[data-role="status"]'),
     };
-    installDocumentListener(documentRef);
+    installDocumentListeners(documentRef);
     renderPanel();
     log('userscript instalado: extração automática ativa, sem integrações externas');
     return root;
@@ -475,11 +534,14 @@
     extractIntermediateAnswer,
     extractOslerCard,
     extractTopic,
+    findActionElement,
     findQuestionElement,
     finishCalibration,
+    handleDocumentAction,
     handleDocumentClick,
     install,
     installDocumentListener,
+    installDocumentListeners,
     loadConfig,
     logsJson,
     normalizeButtonText,
@@ -488,6 +550,7 @@
     replaceClozesWithPlaceholders,
     sanitizeHtml,
     saveConfig,
+    scrubSensitiveUrl,
     selectorFor,
     stableHash,
     startCalibration,
