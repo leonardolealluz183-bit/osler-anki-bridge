@@ -29,15 +29,21 @@ function visible(order, tag, text, rect = {}) {
     order,
     tagName: tag.toUpperCase(),
     textContent: text,
+    innerText: text,
     hidden: false,
     offsetParent: {},
     parentElement: null,
+    isConnected: true,
     innerHTML: text,
     outerHTML: `<${tag}>${text}</${tag}>`,
     getClientRects() { return [box]; },
     getBoundingClientRect() { return box; },
+    getAttribute() { return null; },
     compareDocumentPosition(other) { return this.order < other.order ? 4 : 2; },
-    closest() { return null; },
+    closest(selector) {
+      if (selector === 'button,[role="button"]' && this.tagName === 'BUTTON') return this;
+      return null;
+    },
     contains() { return false; },
     querySelector() { return null; },
     querySelectorAll() { return []; },
@@ -164,6 +170,22 @@ function bodyClozeDocument(answer) {
   return documentRef;
 }
 
+function advanceDocument() {
+  let question = questionNode('Alergia Alimentar. A prevalência é maior em lactentes.', 'Alergia Alimentar');
+  let buttons = [visible(10, 'button', 'Errei'), visible(11, 'button', 'Difícil')];
+  return {
+    body: {},
+    documentElement: { clientWidth: 1600, clientHeight: 900 },
+    querySelectorAll(selector) {
+      if (selector === 'p') return question ? [question] : [];
+      if (selector === 'button,[role="button"]') return buttons;
+      return [];
+    },
+    setQuestion(next) { question = next; },
+    setButtons(next) { buttons = next; },
+  };
+}
+
 test('page modes separate capture from the heavy report screen', () => {
   assert.equal(bridge.pageMode({ pathname: '/test' }), 'test');
   assert.equal(bridge.pageMode({ pathname: '/test/' }), 'test');
@@ -215,8 +237,45 @@ test('keyboard shortcuts map 1 to Errei and 2 to Difícil', () => {
   const body = { tagName: 'BODY', closest() { return null; } };
   assert.equal(bridge.keyTriggerForEvent({ key: '1', target: body }), 'Errei');
   assert.equal(bridge.keyTriggerForEvent({ key: '2', target: body }), 'Difícil');
+  assert.equal(bridge.keyTriggerForEvent({ code: 'Digit1', target: body }), 'Errei');
+  assert.equal(bridge.keyTriggerForEvent({ code: 'Digit2', target: body }), 'Difícil');
   assert.equal(bridge.keyTriggerForEvent({ key: ' ', target: body }), null);
   assert.equal(bridge.keyTriggerForEvent({ key: '1', target: { tagName: 'INPUT' } }), null);
+  assert.deepEqual(bridge.keyDescriptorForTrigger('Errei'), { key: '1', code: 'Digit1', keyCode: 49 });
+  assert.deepEqual(bridge.keyDescriptorForTrigger('Difícil'), { key: '2', code: 'Digit2', keyCode: 50 });
+});
+
+test('detects advancement when the question node changes', () => {
+  global.location.pathname = '/test';
+  const documentRef = advanceDocument();
+  global.document = documentRef;
+  const snapshot = bridge.advanceSnapshot(documentRef);
+  documentRef.setQuestion(questionNode('Alergia Alimentar. O pico ocorre em um ano.', 'Alergia Alimentar'));
+  assert.equal(bridge.hasAdvanced(snapshot, documentRef), true);
+});
+
+test('detects advancement when rating buttons disappear', () => {
+  global.location.pathname = '/test';
+  const documentRef = advanceDocument();
+  global.document = documentRef;
+  const snapshot = bridge.advanceSnapshot(documentRef);
+  documentRef.setButtons([]);
+  assert.equal(bridge.hasAdvanced(snapshot, documentRef), true);
+});
+
+test('does not claim advancement while the same answered card remains', () => {
+  global.location.pathname = '/test';
+  const documentRef = advanceDocument();
+  global.document = documentRef;
+  const snapshot = bridge.advanceSnapshot(documentRef);
+  assert.equal(bridge.hasAdvanced(snapshot, documentRef), false);
+});
+
+test('parses permanent and legacy stored arrays', () => {
+  assert.deepEqual(bridge.parseStoredValue('[{"id":"abc"}]'), [{ id: 'abc' }]);
+  assert.deepEqual(bridge.parseStoredValue([{ id: 'abc' }]), [{ id: 'abc' }]);
+  assert.deepEqual(bridge.parseStoredValue('not-json'), []);
+  assert.deepEqual(bridge.parseStoredValue(null), []);
 });
 
 test('rejects a placeholder list before the hidden answer is revealed', () => {
@@ -262,14 +321,16 @@ test('rejects verdict-only cards without answers', () => {
   assert.equal(result.valid, false);
 });
 
-test('source and published copy are identical at v0.4.6', () => {
+test('source and published copy are identical at v0.4.7', () => {
   const source = fs.readFileSync(path.join(__dirname, '../userscript/osler-anki-bridge.user.js'), 'utf8');
   const published = fs.readFileSync(path.join(__dirname, '../docs/osler-anki-bridge.user.js'), 'utf8');
   assert.equal(source, published);
-  assert.match(source, /@version\s+0\.4\.6/);
-  assert.match(source, /bloqueado sem avançar/);
-  assert.match(source, /Só avança depois de salvar/);
-  assert.match(source, /CAPTURE_TIMEOUT_MS = 2200/);
+  assert.match(source, /@version\s+0\.4\.7/);
+  assert.match(source, /@grant\s+GM_getValue/);
+  assert.match(source, /@grant\s+GM_setValue/);
+  assert.match(source, /ADVANCE_CONFIRM_MS = 950/);
+  assert.match(source, /SALVO E AVANÇOU/);
+  assert.match(source, /Fila permanente do Violentmonkey ativa/);
   assert.match(source, /URL\.revokeObjectURL\(url\), 60000/);
   assert.doesNotMatch(source.split('// ==/UserScript==')[1] || '', /\bfetch\s*\(|XMLHttpRequest|GM_xmlhttpRequest/);
 });
