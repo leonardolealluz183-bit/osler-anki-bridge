@@ -1,34 +1,48 @@
 # Osler Anki Bridge
 
-Fase 1 Android-only para capturar e diagnosticar cards da Osler por meio de userscript, sem envio de dados e sem integração com AnkiDroid ou aplicativo Android.
+Userscript Android-only que captura cards marcados como **Errei** ou **Difícil** na Osler, mantém uma fila persistente e exporta tudo de uma vez para importação no AnkiDroid.
 
-## Versão 0.3.4
+## Versão 0.4.0 — Fase 2
 
-A extração na página real da Osler é automática:
+A Fase 2 evita criar um aplicativo intermediário desnecessário. O próprio AnkiDroid aceita arquivos de texto tabulados pelo sistema de compartilhamento/importação do Android, então o fluxo é:
 
-- localiza a pergunta a partir de `div.osler-card-explanation`;
-- extrai o assunto do primeiro `<strong>` da pergunta;
-- substitui respostas reveladas `.cloze-answer` por `[...]` na versão da pergunta;
-- preserva também a pergunta revelada;
-- captura um ou vários clozes como resposta;
-- em cards sem cloze, captura o bloco de resposta existente entre a pergunta e a explicação, incluindo listas;
-- captura todos os parágrafos da explicação;
-- detecta **Errei** e **Difícil** pelo rótulo e, como fallback, pela posição real dos botões SRS dentro do `ButtonsContainer` da Osler;
-- escuta `touchstart`, `pointerdown` e `click` para capturar antes da troca do card;
-- ignora **Acertei**;
-- remove `token`, `access_token`, assinatura e parâmetros equivalentes das URLs presentes no HTML copiado.
+1. estudar normalmente na Osler;
+2. **Errei** e **Difícil** adicionam o card à fila persistente;
+3. **Acertei** é ignorado;
+4. tocar em **Enviar ao AnkiDroid** ao fim da sessão;
+5. selecionar o AnkiDroid no compartilhamento do Android e confirmar a importação.
 
-A calibração manual permanece disponível somente como fallback de diagnóstico.
+Se o navegador não conseguir compartilhar arquivos diretamente, o botão baixa um arquivo `.tsv`, que pode ser aberto no AnkiDroid.
 
-## Conteúdo do repositório
+## Conteúdo exportado
 
-- `userscript/osler-anki-bridge.user.js`: código-fonte do userscript.
-- `docs/osler-anki-bridge.user.js`: cópia publicada pelo GitHub Pages.
-- `docs/index.html`: página simulada da estrutura real da Osler.
-- `tests/osler-anki-bridge.test.js`: testes automatizados da extração.
-- `docs/android-only.md`: instruções e limites da Fase 1.
+O TSV usa os cabeçalhos de importação do Anki:
 
-O GitHub Pages deve ser configurado para publicar diretamente da branch `main`, pasta `/docs`.
+- separador `Tab`;
+- HTML habilitado;
+- colunas `Frente`, `Verso`, `Tags` e `Baralho`;
+- coluna 3 tratada como tags;
+- coluna 4 tratada como baralho;
+- baralho `Osler` criado pelo importador quando necessário.
+
+A frente contém a pergunta e um identificador invisível para reduzir duplicatas. O verso contém resposta, explicação, assunto, ID e link para a Osler. Imagens protegidas por token não são copiadas nesta versão; o exportador coloca um aviso textual no lugar delas.
+
+## Captura
+
+A extração continua automática:
+
+- pergunta localizada a partir de `div.osler-card-explanation`;
+- assunto extraído do primeiro `<strong>`;
+- `.cloze-answer` substituído por `[...]` na frente;
+- resposta revelada preservada;
+- cards sem cloze extraídos do bloco entre pergunta e explicação;
+- explicação completa preservada;
+- Errei e Difícil reconhecidos por texto e pela posição dos botões SRS;
+- tokens temporários removidos das URLs.
+
+## Persistência e segurança
+
+A fila fica somente no `localStorage` do domínio da Osler, na chave `oslerAnkiBridge.queue.v1`. Ela sobrevive ao recarregamento da página e só é apagada pelo botão **Limpar fila**. O userscript não usa servidor, `fetch`, backend ou sincronização externa.
 
 ## Desenvolvimento
 
@@ -37,6 +51,10 @@ npm test
 npm run lint
 ```
 
-## Fora do escopo
+O GitHub Pages publica `docs/osler-anki-bridge.user.js` diretamente de `main/docs`.
 
-Este repositório ainda não implementa Fase 2, Android Intent, envio direto ao AnkiDroid, backend, sincronização em nuvem nem aplicativo Android nativo.
+## Próximas limitações a resolver
+
+- validar o fluxo real de compartilhamento/importação no Firefox Android e no AnkiDroid;
+- decidir a melhor configuração inicial de tipo de nota no importador;
+- adicionar imagens como mídia real do Anki em uma etapa posterior, caso o ganho compense a complexidade.
