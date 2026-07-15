@@ -219,6 +219,29 @@ test('keyboard shortcuts map 1 to Errei and 2 to Difícil', () => {
   assert.equal(bridge.keyTriggerForEvent({ key: '1', target: { tagName: 'INPUT' } }), null);
 });
 
+test('rejects a placeholder list before the hidden answer is revealed', () => {
+  const result = bridge.validateCard({
+    question: { text: 'São objetos não pontiagudos cuja ingestão pode ser uma causa:' },
+    answer: {
+      source: 'card-body',
+      text: '[...], e Baterias/pilhas.',
+      html: '<ul><li>[...]</li><li>Baterias/pilhas</li></ul>',
+    },
+    topic: { text: 'Abdome Agudo Perfurativo' },
+  });
+  assert.equal(result.valid, false);
+  assert.ok(result.reasons.includes('resposta ainda não revelada'));
+});
+
+test('accepts a revealed cloze even when the question contains a blank', () => {
+  const result = bridge.validateCard({
+    question: { text: 'A tríade de [...] é sugestiva de ruptura esofágica.' },
+    answer: { source: 'question-cloze', text: 'Mackler', html: 'Mackler' },
+    topic: { text: 'Cirurgia Geral' },
+  });
+  assert.equal(result.valid, true);
+});
+
 test('excludes citation paragraphs from answers', () => {
   assert.equal(bridge.isCitationText('Etiologies and diagnosis, em UpToDate.'), true);
   assert.equal(bridge.isCitationText('Mecânica, ou funcional.'), false);
@@ -239,12 +262,14 @@ test('rejects verdict-only cards without answers', () => {
   assert.equal(result.valid, false);
 });
 
-test('source and published copy are identical at v0.4.5', () => {
+test('source and published copy are identical at v0.4.6', () => {
   const source = fs.readFileSync(path.join(__dirname, '../userscript/osler-anki-bridge.user.js'), 'utf8');
   const published = fs.readFileSync(path.join(__dirname, '../docs/osler-anki-bridge.user.js'), 'utf8');
   assert.equal(source, published);
-  assert.match(source, /@version\s+0\.4\.5/);
-  assert.match(source, /Modo leve de exportação: captura e varredura desligadas nesta tela/);
+  assert.match(source, /@version\s+0\.4\.6/);
+  assert.match(source, /bloqueado sem avançar/);
+  assert.match(source, /Só avança depois de salvar/);
+  assert.match(source, /CAPTURE_TIMEOUT_MS = 2200/);
   assert.match(source, /URL\.revokeObjectURL\(url\), 60000/);
   assert.doesNotMatch(source.split('// ==/UserScript==')[1] || '', /\bfetch\s*\(|XMLHttpRequest|GM_xmlhttpRequest/);
 });
