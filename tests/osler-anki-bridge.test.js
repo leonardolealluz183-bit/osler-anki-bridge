@@ -228,7 +228,7 @@ test('does not depend on styled-components dynamic classes', () => {
   assert.deepEqual(first.answer.text, second.answer.text);
 });
 
-test('detects Errei and Difícil from nested button content and ignores Acertei', () => {
+test('detects concatenated Errei and Difícil labels and ignores Acertei', () => {
   function button(text) {
     const node = {
       tagName: 'BUTTON',
@@ -239,9 +239,9 @@ test('detects Errei and Difícil from nested button content and ignores Acertei'
     };
     return node;
   }
-  const wrong = button(' Errei ');
-  const hard = button('DIFÍCIL 12 min');
-  const correct = button('Acertei');
+  const wrong = button('Errei7 dias');
+  const hard = button('DIFÍCIL12 min');
+  const correct = button('Acertei4 dias');
   const nestedWrong = { closest() { return wrong; } };
 
   assert.equal(bridge.triggerForButton(bridge.findActionElement(nestedWrong)), 'botão Errei');
@@ -264,7 +264,7 @@ test('captures an automatic card once and ignores duplicates', () => {
 
 test('userscript header targets Osler and provides update URLs without localhost', () => {
   const source = fs.readFileSync(path.join(__dirname, '../userscript/osler-anki-bridge.user.js'), 'utf8');
-  assert.match(source, /@version\s+0\.3\.2/);
+  assert.match(source, /@version\s+0\.3\.3/);
   assert.match(source, /@match\s+https:\/\/oslermedicina\.com\.br\/\*/);
   assert.match(source, /@match\s+https:\/\/\*\.oslermedicina\.com\.br\/\*/);
   assert.match(source, /@updateURL\s+https:\/\/leonardolealluz183-bit\.github\.io\/osler-anki-bridge\/osler-anki-bridge\.user\.js/);
