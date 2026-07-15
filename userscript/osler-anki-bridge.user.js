@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Osler Capture Diagnostics
 // @namespace    https://github.com/osler-anki-bridge/osler-anki-bridge
-// @version      0.3.0
+// @version      0.3.1
 // @description  Phase 1 automatic capture diagnostics for Osler cards. No network, AnkiDroid, or app integration.
 // @match        https://oslermedicina.com.br/*
 // @match        https://*.oslermedicina.com.br/*
@@ -149,20 +149,29 @@
 
   function findQuestionElement(explanationElement) {
     if (!explanationElement) return null;
+
+    let fallback = null;
     let sibling = explanationElement.previousElementSibling;
     while (sibling) {
-      if (String(sibling.tagName || '').toLowerCase() === 'p') return sibling;
+      if (String(sibling.tagName || '').toLowerCase() === 'p') {
+        if (!fallback) fallback = sibling;
+        if (sibling.querySelector?.('strong')) return sibling;
+      }
       sibling = sibling.previousElementSibling;
     }
+    if (fallback) return fallback;
 
     const parent = explanationElement.parentElement;
     if (!parent) return null;
     const children = Array.from(parent.children || []);
     const explanationIndex = children.indexOf(explanationElement);
     for (let index = explanationIndex - 1; index >= 0; index -= 1) {
-      if (String(children[index]?.tagName || '').toLowerCase() === 'p') return children[index];
+      const candidate = children[index];
+      if (String(candidate?.tagName || '').toLowerCase() !== 'p') continue;
+      if (!fallback) fallback = candidate;
+      if (candidate.querySelector?.('strong')) return candidate;
     }
-    return null;
+    return fallback;
   }
 
   function replaceClozesWithPlaceholders(questionElement) {
@@ -186,8 +195,55 @@
     }));
     return {
       selector: '.cloze-answer',
+      source: 'cloze',
       text: items.map((item) => item.text).filter(Boolean).join('; '),
       html: items.map((item) => item.html).filter(Boolean).join('; '),
+      items,
+    };
+  }
+
+  function elementsBetween(questionElement, explanationElement) {
+    const parent = questionElement?.parentElement;
+    if (!parent || parent !== explanationElement?.parentElement) return [];
+    const children = Array.from(parent.children || []);
+    const questionIndex = children.indexOf(questionElement);
+    const explanationIndex = children.indexOf(explanationElement);
+    if (questionIndex < 0 || explanationIndex <= questionIndex) return [];
+    return children.slice(questionIndex + 1, explanationIndex);
+  }
+
+  function extractIntermediateAnswer(questionElement, explanationElement, documentRef = global.document) {
+    const containers = elementsBetween(questionElement, explanationElement).filter((element) => {
+      const tag = String(element?.tagName || '').toLowerCase();
+      if (!element || ['script', 'style', 'button'].includes(tag)) return false;
+      return Boolean(normalizeWhitespace(element.textContent) || element.querySelector?.('img, svg'));
+    });
+
+    const itemElements = [];
+    containers.forEach((container) => {
+      const tag = String(container.tagName || '').toLowerCase();
+      const listItems = tag === 'li'
+        ? [container]
+        : Array.from(container.querySelectorAll?.('li') || []);
+      if (listItems.length) itemElements.push(...listItems);
+      else itemElements.push(container);
+    });
+
+    const items = itemElements
+      .map((element) => ({
+        text: normalizeWhitespace(element.textContent),
+        html: sanitizeHtml(element.innerHTML, documentRef),
+      }))
+      .filter((item) => item.text || item.html);
+
+    return {
+      selector: 'between(question, explanation)',
+      source: 'intermediate-block',
+      text: items.map((item) => item.text).filter(Boolean).join('\n'),
+      html: containers
+        .map((element) => sanitizeHtml(element.outerHTML || element.innerHTML, documentRef))
+        .filter(Boolean)
+        .join('\n'),
       items,
     };
   }
@@ -210,7 +266,10 @@
     const revealedQuestion = readElement(questionElement, selectorFor(questionElement), documentRef);
     const placeholderQuestion = replaceClozesWithPlaceholders(questionElement);
     const topic = extractTopic(questionElement, documentRef);
-    const answer = extractAnswers(questionElement, documentRef);
+    const clozeAnswer = extractAnswers(questionElement, documentRef);
+    const answer = clozeAnswer.items.length
+      ? clozeAnswer
+      : extractIntermediateAnswer(questionElement, explanationElement, documentRef);
     const explanation = readElement(explanationElement, 'div.osler-card-explanation', documentRef);
 
     return {
@@ -236,7 +295,7 @@
         revealedText: question.text,
         revealedHtml: question.html,
       },
-      answer: { ...readField(config.answer, documentRef), items: [] },
+      answer: { ...readField(config.answer, documentRef), source: 'manual-fallback', items: [] },
       explanation: readField(config.explanation, documentRef),
       topic: readField(config.deck, documentRef),
       deck: readField(config.deck, documentRef),
@@ -411,7 +470,9 @@
     captureCard,
     clearCalibration,
     createPanel,
+    elementsBetween,
     extractAnswers,
+    extractIntermediateAnswer,
     extractOslerCard,
     extractTopic,
     findQuestionElement,
