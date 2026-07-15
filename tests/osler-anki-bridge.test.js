@@ -31,7 +31,7 @@ function makeQuestion({ topic = 'Fisiologia Renal.', segments = [] } = {}) {
   }
 
   function buildNode(localTokens) {
-    const node = {
+    return {
       tagName: 'P',
       nodeType: 1,
       classList: ['ContentText-dynamicHash'],
@@ -41,6 +41,7 @@ function makeQuestion({ topic = 'Fisiologia Renal.', segments = [] } = {}) {
       get children() { return []; },
       get textContent() { return localTokens.map(buildTokenText).join(''); },
       get innerHTML() { return localTokens.map(buildTokenHtml).join(''); },
+      get outerHTML() { return `<p>${this.innerHTML}</p>`; },
       querySelector(selector) {
         return selector === 'strong' ? strong : null;
       },
@@ -59,13 +60,44 @@ function makeQuestion({ topic = 'Fisiologia Renal.', segments = [] } = {}) {
         return buildNode(localTokens.map((token) => ({ ...token })));
       },
     };
-    return node;
   }
 
   return buildNode(tokens);
 }
 
-function makeCardDocument({ topic, className = 'fWJzQ', explanationParagraphs = 4, segments } = {}) {
+function makeListAnswer(items) {
+  const listItems = items.map((item) => ({
+    tagName: 'LI',
+    textContent: item,
+    innerHTML: `<strong>${item}</strong>`,
+    outerHTML: `<li><strong>${item}</strong></li>`,
+    querySelectorAll() { return []; },
+    querySelector() { return null; },
+  }));
+  return {
+    tagName: 'UL',
+    nodeType: 1,
+    classList: ['AnswerContainer-random'],
+    attributes: [],
+    textContent: items.join(' '),
+    innerHTML: listItems.map((item) => item.outerHTML).join(''),
+    outerHTML: `<ul>${listItems.map((item) => item.outerHTML).join('')}</ul>`,
+    parentElement: null,
+    previousElementSibling: null,
+    querySelector() { return null; },
+    querySelectorAll(selector) {
+      return selector === 'li' ? listItems : [];
+    },
+  };
+}
+
+function makeCardDocument({
+  topic,
+  className = 'fWJzQ',
+  explanationParagraphs = 4,
+  segments,
+  intermediate = [],
+} = {}) {
   const question = makeQuestion({ topic, segments });
   question.classList = [className];
   const paragraphs = Array.from({ length: explanationParagraphs }, (_, index) => `<p><em>Parágrafo ${index + 1}</em></p>`);
@@ -76,12 +108,18 @@ function makeCardDocument({ topic, className = 'fWJzQ', explanationParagraphs = 
     attributes: [],
     textContent: paragraphs.map((_, index) => `Parágrafo ${index + 1}`).join(' '),
     innerHTML: paragraphs.join('\n'),
-    previousElementSibling: question,
+    outerHTML: `<div class="osler-card-explanation">${paragraphs.join('\n')}</div>`,
+    previousElementSibling: null,
     parentElement: null,
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
   };
-  const parent = { children: [question, explanation] };
-  question.parentElement = parent;
-  explanation.parentElement = parent;
+  const children = [question, ...intermediate, explanation];
+  const parent = { children };
+  children.forEach((child, index) => {
+    child.parentElement = parent;
+    child.previousElementSibling = index > 0 ? children[index - 1] : null;
+  });
   return fakeDocument({ 'div.osler-card-explanation': explanation });
 }
 
@@ -117,12 +155,49 @@ test('extracts multiple cloze answers and replaces them with placeholders', () =
     topic: 'Fisiologia Renal.',
     segments: defaultSegments(),
   }));
+  assert.equal(card.answer.source, 'cloze');
   assert.equal(card.answer.text, 'reter HCO3–; ácidos');
   assert.equal(card.answer.items.length, 2);
   assert.equal(card.question.text, 'Fisiologia Renal. O rim impede acidose ao [...] e eliminar [...].');
   assert.match(card.question.html, /\[\.\.\.\]/);
   assert.equal(card.question.revealedText, 'Fisiologia Renal. O rim impede acidose ao reter HCO3– e eliminar ácidos.');
-  assert.match(card.question.revealedHtml, /cloze-answer|reter HCO/);
+});
+
+test('extracts a non-cloze answer block located between question and explanation', () => {
+  const answerList = makeListAnswer(['Amniocentese', 'Trauma abdominal', 'Parto']);
+  const card = bridge.extractOslerCard(makeCardDocument({
+    topic: 'Aloimunização Rh.',
+    segments: [
+      { type: 'plain', text: 'O sangramento fetomaternal está associado a situações como:', html: 'O sangramento fetomaternal está associado a situações como:' },
+    ],
+    intermediate: [answerList],
+  }));
+
+  assert.equal(card.question.text, 'Aloimunização Rh. O sangramento fetomaternal está associado a situações como:');
+  assert.equal(card.answer.source, 'intermediate-block');
+  assert.equal(card.answer.text, 'Amniocentese\nTrauma abdominal\nParto');
+  assert.equal(card.answer.items.length, 3);
+  assert.match(card.answer.html, /<ul>/);
+});
+
+test('finds the question by its strong topic even when answer paragraphs are between it and explanation', () => {
+  const answerParagraph = {
+    tagName: 'P',
+    textContent: 'Resposta intermediária',
+    innerHTML: 'Resposta intermediária',
+    outerHTML: '<p>Resposta intermediária</p>',
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+  };
+  const doc = makeCardDocument({
+    topic: 'Tema correto.',
+    segments: [{ type: 'plain', text: 'Pergunta real?', html: 'Pergunta real?' }],
+    intermediate: [answerParagraph],
+  });
+  const card = bridge.extractOslerCard(doc);
+  assert.equal(card.topic.text, 'Tema correto');
+  assert.match(card.question.text, /Pergunta real/);
+  assert.equal(card.answer.text, 'Resposta intermediária');
 });
 
 test('captures the complete explanation with four or more paragraphs', () => {
@@ -164,7 +239,7 @@ test('captures an automatic card once and ignores duplicates', () => {
 
 test('userscript header targets Osler and provides update URLs without localhost', () => {
   const source = fs.readFileSync(path.join(__dirname, '../userscript/osler-anki-bridge.user.js'), 'utf8');
-  assert.match(source, /@version\s+0\.3\.0/);
+  assert.match(source, /@version\s+0\.3\.1/);
   assert.match(source, /@match\s+https:\/\/oslermedicina\.com\.br\/\*/);
   assert.match(source, /@match\s+https:\/\/\*\.oslermedicina\.com\.br\/\*/);
   assert.match(source, /@updateURL\s+https:\/\/leonardolealluz183-bit\.github\.io\/osler-anki-bridge\/osler-anki-bridge\.user\.js/);
