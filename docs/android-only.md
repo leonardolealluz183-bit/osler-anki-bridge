@@ -2,17 +2,37 @@
 
 A Fase 1 é um userscript de captura e diagnóstico para uso em navegador Android com gerenciador de userscripts. Ela não envia dados para a internet, não chama Android Intent, não integra com AnkiDroid e não inclui aplicativo Android nativo.
 
-## Fluxo da Fase 1
+## Fluxo da versão 0.3.3
 
-1. Abra a página simulada ou uma página Osler real no navegador com o userscript instalado.
-2. Use o painel **Osler Capture Diagnostics — Fase 1** para calibrar visualmente os elementos de pergunta, resposta, explicação, assunto/deck, botão **Errei** e botão **Difícil**.
-3. Ao tocar em **Errei** ou **Difícil**, o userscript captura o card antes do avanço da página.
-4. **Acertei** não captura por padrão.
-5. Revise o painel JSON e use **Copiar JSON** ou **Copiar logs** para exportar localmente o diagnóstico.
+1. Abra uma sessão de flashcards na Osler com o userscript instalado.
+2. Toque em **Mostrar resposta**.
+3. Ao tocar em **Errei** ou **Difícil**, o script captura o card antes da troca de tela.
+4. **Acertei** não captura.
+5. Use **Copiar JSON** para revisar o resultado.
 
-## Segurança e limitações
+A captura dos botões usa `pointerdown` e `click`, com supressão da duplicata do mesmo gesto. A detecção aceita textos concatenados, como `Errei7 dias` ou `Difícil12 min`, porque a Osler pode montar o rótulo e o intervalo sem espaço no `textContent`.
 
-- O HTML capturado é sanitizado para remover scripts e atributos perigosos.
-- Capturas duplicadas são ignoradas usando um identificador estável do conteúdo do card.
+Na página real da Osler não é necessário calibrar pergunta, assunto, resposta, explicação ou botões. A extração automática usa a estrutura estável do card, não as classes dinâmicas geradas pelo layout.
+
+## Estrutura capturada
+
+- `topic` e `deck`: primeiro `<strong>` da pergunta, sem pontuação final.
+- `question.text` e `question.html`: pergunta com cada `.cloze-answer` substituído por `[...]`.
+- `question.revealedText` e `question.revealedHtml`: versão revelada.
+- `answer`: usa os elementos `.cloze-answer` quando existem.
+- Em cards sem cloze, `answer` é obtido do bloco exibido entre a pergunta e `div.osler-card-explanation`, incluindo itens de lista.
+- `explanation`: todo o bloco `div.osler-card-explanation`, incluindo todos os parágrafos.
+
+O campo `answer.source` informa se a origem foi `cloze`, `intermediate-block` ou `manual-fallback`.
+
+## Privacidade do JSON
+
+O sanitizador remove scripts, atributos perigosos e parâmetros sensíveis de URLs, incluindo `token`, `access_token`, `authorization`, `signature`, `sig`, `key` e `jwt`. A URL relativa da imagem permanece no HTML, mas o token temporário não deve aparecer no JSON copiado.
+
+## Fallback e limitações
+
+- A calibração manual permanece em um painel recolhível apenas para diagnóstico de páginas não reconhecidas.
+- **Limpar calibração** remove a configuração manual salva na chave v2.
+- Capturas duplicadas são ignoradas por identificador estável.
 - Nenhum dado é transmitido pela internet.
-- Fase 2, backend, sincronização, AnkiDroid e aplicativo Android permanecem fora do escopo.
+- A Fase 2 e a integração com AnkiDroid permanecem fora do escopo.
