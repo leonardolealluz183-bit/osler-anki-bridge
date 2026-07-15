@@ -1,8 +1,8 @@
 {
   "name": "osler-anki-bridge",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "private": true,
-  "description": "Captura seletiva de cards da Osler com atalhos 1/2, fila persistente, auditoria e relatório em modo leve.",
+  "description": "Captura transacional de cards da Osler: salva antes de avançar, com atalhos 1/2, auditoria e exportação TSV.",
   "scripts": {
     "test": "node --test",
     "lint": "node --check userscript/osler-anki-bridge.user.js && node --check docs/osler-anki-bridge.user.js && node --check tests/osler-anki-bridge.test.js"
