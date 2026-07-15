@@ -2,28 +2,29 @@
 
 Userscript Android-only que captura cards marcados como **Errei** ou **Difícil** na Osler, mantém uma fila persistente e exporta tudo de uma vez para importação no AnkiDroid.
 
-## Versão 0.4.5 — Fase 2
+## Versão 0.4.6 — Fase 2
 
 Correções principais:
 
 - mantém os atalhos: **Espaço** mostra a resposta pela Osler, **1** captura Errei e **2** captura Difícil;
-- distingue cards com o mesmo enunciado e respostas ocultas diferentes;
-- mostra cada tentativa como adicionada, duplicada ou falhou e mantém log persistente;
-- desliga completamente captura, varredura de DOM e `MutationObserver` na tela pesada `/test/report`;
-- acompanha mudanças de rota da aplicação e ativa a captura somente em `/test`;
-- mantém o painel em modo leve no relatório para exportar TSV e log sem travar a página;
-- troca `File` por `Blob` no download e mantém a URL do arquivo por 60 segundos, reduzindo falhas de download no Firefox Android;
-- preserva a fila existente em `localStorage` durante a atualização.
+- transforma `1` e `2` em uma captura transacional: o evento nativo é bloqueado, o script espera a resposta, salva o card e só então aciona o botão da Osler;
+- tenta novamente a leitura a cada 60 ms por até 2,2 segundos;
+- se a resposta não aparecer, registra a falha e não avança para o próximo card;
+- rejeita listas ainda não reveladas que contenham `[...]`, evitando cards malformados como `[..., e Baterias/pilhas]`;
+- mantém cards com o mesmo enunciado e respostas ocultas diferentes como IDs distintos;
+- aplica o mesmo fluxo protegido aos cliques em Errei/Difícil;
+- preserva a fila no mesmo `localStorage`, mantém log de até 500 eventos e conserva o modo leve em `/test/report`.
 
-O problema que motivou a 0.4.5 ocorreu no relatório final de uma sessão com 203 cards: a varredura do script continuava ativa sobre uma página muito grande, tornando os botões da Osler e o download praticamente irresponsivos.
+O problema que motivou a 0.4.6 foi confirmado pelo log de uma sessão: alguns atalhos não produziram evento de captura, enquanto outros foram processados antes de a resposta terminar de renderizar. A partir desta versão, o card não pode avançar silenciosamente sem que a tentativa termine como salvo, duplicado ou falhou sem avançar.
 
 ## Fluxo
 
-1. Durante o teste, pressione **Espaço**, depois **1** ou **2**.
-2. No relatório final, o painel muda para **Modo leve de exportação**.
-3. Clique em **Baixar TSV**; a fila permanece salva mesmo antes do download.
-4. **Baixar log** exporta o histórico de tentativas para diagnóstico.
-5. Confira o TSV antes de importar no AnkiDroid.
+1. Pressione **Espaço** para mostrar a resposta.
+2. Pressione **1** para Errei ou **2** para Difícil.
+3. O painel mostra `AGUARDANDO RESPOSTA` e depois `SALVO`.
+4. A Osler só passa ao próximo card depois de o card entrar na fila.
+5. Quando aparecer `NÃO AVANÇOU`, permaneça no mesmo card, mostre a resposta e pressione novamente.
+6. No relatório final, use **Baixar TSV** ou **Baixar log** no modo leve.
 
 ## Desenvolvimento
 
