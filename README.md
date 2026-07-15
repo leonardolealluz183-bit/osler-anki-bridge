@@ -2,44 +2,30 @@
 
 Userscript Android-only que captura cards marcados como **Errei** ou **Difícil** na Osler, mantém uma fila persistente e exporta tudo de uma vez para importação no AnkiDroid.
 
-## Versão 0.4.1 — Fase 2
+## Versão 0.4.2 — Fase 2
 
-Fluxo:
+Correções principais:
 
-1. estudar normalmente na Osler;
-2. **Errei** e **Difícil** adicionam o card à fila persistente;
-3. **Acertei** é ignorado;
-4. tocar em **Enviar ao AnkiDroid** ao fim da sessão;
-5. selecionar o AnkiDroid no compartilhamento do Android ou abrir o TSV baixado.
+- captura perguntas e respostas que ficam em contêineres diferentes na página;
+- escolhe a pergunta temática correta em vez de confundir um parágrafo-resposta em negrito com a pergunta;
+- mantém um snapshot recente do card revelado para resistir à troca imediata de tela;
+- reforça a detecção de Errei e Difícil com listeners delegados, listeners diretos, `MutationObserver` e varredura periódica;
+- adiciona **Adicionar card atual** como fallback manual de segurança;
+- preserva a fila em `localStorage` e exporta TSV para o AnkiDroid;
+- remove highlights de calibração e tokens temporários.
 
-## Correções da 0.4.1
+O card real usado para validar esta correção foi:
 
-- remove automaticamente wrappers `mark.osler-highlight` e seus offsets sem apagar o texto;
-- repara a fila antiga ao carregar a página;
-- remove da fila cards inválidos, como uma falsa pergunta composta apenas por `Não!` e sem resposta;
-- impede que cards sem resposta ou com assunto/pergunta de mero veredito entrem no TSV;
-- procura a pergunta real antes de parágrafos intermediários como `Sim!` e `Não!`;
-- reforça a captura de botões recriados dinamicamente com `MutationObserver` e listeners diretos;
-- mantém a deduplicação por ID e a persistência em `localStorage`.
+- pergunta: `Angioedema. Em linhas gerais, qual a fisiopatologia?`
+- resposta: `Perda da integridade vascular.`
 
-Ao atualizar da 0.4.0 para a 0.4.1, uma fila de cinco cards pode passar para quatro: isso significa que o card inválido foi removido. Os cards válidos permanecem e têm o HTML limpo automaticamente.
+## Fluxo
 
-## Conteúdo exportado
-
-O TSV usa:
-
-- separador `Tab`;
-- HTML habilitado;
-- colunas `Frente`, `Verso`, `Tags` e `Baralho`;
-- coluna 3 tratada como tags;
-- coluna 4 tratada como baralho;
-- baralho `Osler`.
-
-A frente contém a pergunta e um identificador invisível. O verso contém resposta, explicação, assunto, ID e link para a Osler. Imagens protegidas por token são substituídas por um aviso textual.
-
-## Persistência e segurança
-
-A fila fica somente no `localStorage` do domínio da Osler, na chave `oslerAnkiBridge.queue.v1`. O userscript não usa servidor, `fetch`, backend ou sincronização externa.
+1. Estude normalmente na Osler.
+2. Errei e Difícil adicionam o card à fila.
+3. Acertei é ignorado.
+4. O botão **Adicionar card atual** serve apenas quando o contador não aumenta após uma avaliação.
+5. Baixe o TSV ao final da sessão e confira antes de importar no AnkiDroid.
 
 ## Desenvolvimento
 
@@ -47,5 +33,3 @@ A fila fica somente no `localStorage` do domínio da Osler, na chave `oslerAnkiB
 npm test
 npm run lint
 ```
-
-O GitHub Pages publica `docs/osler-anki-bridge.user.js` diretamente de `main/docs`.
