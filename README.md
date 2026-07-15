@@ -2,7 +2,7 @@
 
 Fase 1 Android-only para capturar e diagnosticar cards da Osler por meio de userscript, sem envio de dados e sem integração com AnkiDroid ou aplicativo Android.
 
-## Versão 0.3.0
+## Versão 0.3.1
 
 A extração na página real da Osler é automática:
 
@@ -11,6 +11,7 @@ A extração na página real da Osler é automática:
 - substitui respostas reveladas `.cloze-answer` por `[...]` na versão da pergunta;
 - preserva também a pergunta revelada;
 - captura um ou vários clozes como resposta;
+- em cards sem cloze, captura o bloco de resposta existente entre a pergunta e a explicação, incluindo listas;
 - captura todos os parágrafos da explicação;
 - detecta **Errei** e **Difícil** pelo texto do botão, sem seletores frágeis;
 - ignora **Acertei**.
