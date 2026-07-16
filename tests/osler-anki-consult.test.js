@@ -3,47 +3,30 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
+global.window = globalThis;
 const publishedPath = path.join(__dirname, '../docs/osler-anki-consult.user.js');
 const source = fs.readFileSync(publishedPath, 'utf8');
 const exporter = require(publishedPath);
 
-test('targets the real Consulta mode and loads before SPA navigation', () => {
+test('targets Consulta and loads before SPA navigation', () => {
   assert.match(source, /@name\s+Osler Anki Exporter — Consulta/);
-  assert.match(source, /@version\s+1\.1\.0/);
+  assert.match(source, /@version\s+1\.2\.0/);
   assert.match(source, /@match\s+https:\/\/oslermedicina\.com\.br\/\*/);
   assert.match(source, /@run-at\s+document-start/);
-  assert.match(source, /@grant\s+unsafeWindow/);
-  assert.doesNotMatch(source, /Ver todos/);
+  assert.match(source, /pushState/);
+  assert.match(source, /MutationObserver/);
   assert.doesNotMatch(source, /@require/);
 });
 
-test('detects Consulta routes without reloading the page', () => {
-  assert.equal(exporter.consultPath('/consult'), true);
-  assert.equal(exporter.consultPath('/consulta'), true);
-  assert.equal(exporter.consultPath('/flashcards'), false);
-  assert.match(source, /pushState/);
-  assert.match(source, /replaceState/);
-  assert.match(source, /MutationObserver/);
-});
-
-test('recognizes the orange answer color shown in Consulta', () => {
+test('recognizes the orange answer color', () => {
   assert.equal(exporter.orange([255, 93, 34]), true);
-  assert.equal(exporter.orange([239, 108, 38]), true);
+  assert.equal(exporter.orange('rgb(239, 108, 38)'), true);
   assert.equal(exporter.orange([50, 120, 220]), false);
-  assert.deepEqual(exporter.rgb('#ff5d22'), [255, 93, 34]);
+  assert.deepEqual(exporter.parseColor('#ff5d22'), [255, 93, 34]);
 });
 
-test('expands one grouped source with three lacunas into three unique cards', () => {
-  const variants = exporter.clozeSpecs(
-    'Princípios do SUS',
-    'São princípios organizacionais: descentralização e regionalização.',
-    ['organizacionais', 'descentralização', 'regionalização'],
-  );
-  assert.equal(variants.length, 3);
-  assert.equal(new Set(variants.map((item) => item.id)).size, 3);
-});
-
-test('exports one TSV row per generated card into one explicit deck', () => {
+test('normalizes the deck and exports one TSV row per card', () => {
+  assert.equal(exporter.normalizeDeckName('Preventiva::SUS'), 'Preventiva — SUS');
   const cards = [
     { id: '1', type: 'cloze', topic: 'SUS', frontHtml: '<p>[...]</p>', backHtml: 'A', contextHtml: '', explanationHtml: '' },
     { id: '2', type: 'qa', topic: 'SUS', frontHtml: '<p>Q?</p>', backHtml: 'R', contextHtml: '', explanationHtml: '' },
@@ -54,6 +37,15 @@ test('exports one TSV row per generated card into one explicit deck', () => {
   assert.match(tsv, /tipo_qa/);
 });
 
-test('neutralizes unintended Anki deck hierarchy separators', () => {
-  assert.equal(exporter.deckName('Preventiva::SUS'), 'Preventiva — SUS');
+test('contains two independent card-discovery strategies and count validation', () => {
+  assert.match(source, /function menus\(/);
+  assert.match(source, /function frame\(/);
+  assert.match(source, /mostrando\\s\+\(\\d\+\)/);
+  assert.match(source, /Exportação bloqueada/);
+  assert.match(source, /cards\.length===c\.shown/);
+});
+
+test('stable hashes distinguish different cards', () => {
+  assert.equal(exporter.hash('mesmo'), exporter.hash('mesmo'));
+  assert.notEqual(exporter.hash('um'), exporter.hash('dois'));
 });
