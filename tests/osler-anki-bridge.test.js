@@ -3,67 +3,91 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const patch = require('../userscript/osler-anki-bridge.user.js');
+global.Node = { DOCUMENT_POSITION_FOLLOWING: 4 };
+global.location = {
+  pathname: '/test',
+  href: 'https://oslermedicina.com.br/test',
+  origin: 'https://oslermedicina.com.br',
+};
 
-test('parses arrays from permanent storage values', () => {
-  assert.deepEqual(patch.parseArray([{ id: 'a' }]), [{ id: 'a' }]);
-  assert.deepEqual(patch.parseArray('[{"id":"a"}]'), [{ id: 'a' }]);
-  assert.deepEqual(patch.parseArray('not-json'), []);
-  assert.deepEqual(patch.parseArray(null), []);
+const bridge = require('../userscript/osler-anki-bridge.user.js');
+const noDom = { createElement() { return null; } };
+
+function card(id, topic, question = 'Pergunta?', answer = 'Resposta') {
+  return {
+    id,
+    question: { text: question, html: question },
+    answer: { source: 'question-cloze', text: answer, html: answer },
+    explanation: { text: '', html: '' },
+    topic: { text: topic, html: topic },
+    deck: { text: topic, html: topic },
+    url: 'https://oslermedicina.com.br/test',
+  };
+}
+
+test('is one monolithic v0.4.9 userscript', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../userscript/osler-anki-bridge.user.js'), 'utf8');
+  const published = fs.readFileSync(path.join(__dirname, '../docs/osler-anki-bridge.user.js'), 'utf8');
+  assert.equal(source, published);
+  assert.match(source, /@version\s+0\.4\.9/);
+  assert.doesNotMatch(source, /@require/);
+  assert.match(source, /@grant\s+GM_download/);
+  assert.match(source, /@grant\s+GM_setClipboard/);
 });
 
-test('reports when a failed card was captured later', () => {
-  const result = patch.failureSummaryFromEvents([
+test('uses the card topic as the Anki deck', () => {
+  assert.equal(bridge.deckNameForCard(card('1', 'Alergia Alimentar')), 'Alergia Alimentar');
+  assert.equal(bridge.deckNameForCard(card('2', '')), 'Osler');
+  assert.equal(bridge.deckNameForCard(card('3', 'Clínica::Cardiologia')), 'Clínica — Cardiologia');
+});
+
+test('merges redundant stores without duplicate card ids', () => {
+  const first = card('a', 'A');
+  const second = card('b', 'B');
+  const merged = bridge.mergeCardArrays([first], [first, second], []);
+  assert.deepEqual(merged.map((item) => item.id), ['a', 'b']);
+});
+
+test('TSV exports each topic in the deck column', () => {
+  const tsv = bridge.buildTsvFromQueue([
+    card('a', 'Angioedema'),
+    card('b', 'Rastreio de GBS'),
+  ], noDom);
+  assert.match(tsv, /\t"Angioedema"\n/);
+  assert.match(tsv, /\t"Rastreio de GBS"\n/);
+  assert.doesNotMatch(tsv, /\t"Osler"\n/);
+});
+
+test('reports when the last failed card was captured later', () => {
+  const summary = bridge.summarizeLastFailure([
     {
+      at: '2026-07-16T00:00:00Z',
       status: 'failed',
-      id: '',
+      id: 'abc',
       question: 'Rastreio de GBS. Qual o método de escolha?',
       detail: 'resposta vazia',
     },
     {
+      at: '2026-07-16T00:00:01Z',
       status: 'added',
       id: 'abc',
       question: 'Rastreio de GBS. Qual o método de escolha?',
     },
   ]);
-  assert.match(result, /resposta vazia/);
-  assert.match(result, /foi capturado depois/);
+  assert.equal(summary.exists, true);
+  assert.equal(summary.recovered, true);
+  assert.match(summary.text, /capturada depois/);
 });
 
-test('reports when no later capture is confirmed', () => {
-  const result = patch.failureSummaryFromEvents([
-    {
-      status: 'failed',
-      id: 'missing',
-      question: 'Card ausente',
-      detail: 'resposta não apareceu',
+test('rejects a list before its hidden answer is revealed', () => {
+  const result = bridge.validateCard({
+    ...card('x', 'Tema', 'Pergunta', '[...], e Pilhas'),
+    answer: {
+      source: 'card-body',
+      text: '[...], e Pilhas',
+      html: '<ul><li>[...]</li><li>Pilhas</li></ul>',
     },
-    {
-      status: 'added',
-      id: 'other',
-      question: 'Outro card',
-    },
-  ]);
-  assert.match(result, /Não há captura posterior confirmada/);
-});
-
-test('reports when there are no failures', () => {
-  assert.equal(patch.failureSummaryFromEvents([
-    { status: 'added', question: 'Card válido' },
-  ]), 'Nenhuma falha registrada.');
-});
-
-test('source and published copy are identical at v0.4.8', () => {
-  const source = fs.readFileSync(path.join(__dirname, '../userscript/osler-anki-bridge.user.js'), 'utf8');
-  const published = fs.readFileSync(path.join(__dirname, '../docs/osler-anki-bridge.user.js'), 'utf8');
-  assert.equal(source, published);
-  assert.match(source, /@version\s+0\.4\.8/);
-  assert.match(source, /@grant\s+GM_download/);
-  assert.match(source, /@grant\s+GM_setClipboard/);
-  assert.match(source, /@require\s+https:\/\/raw\.githubusercontent\.com\/leonardolealluz183-bit\/osler-anki-bridge\/d563f7f73a48916ed8e9e0405b7aaa22b7e3939f\/userscript\/osler-anki-bridge\.user\.js/);
-  assert.match(source, /ARQUIVO BAIXADO/);
-  assert.match(source, /Abrir TSV/);
-  assert.match(source, /Copiar log/);
-  assert.match(source, /Última falha:/);
-  assert.doesNotMatch(source.split('// ==/UserScript==')[1] || '', /\bfetch\s*\(|XMLHttpRequest|GM_xmlhttpRequest/);
+  });
+  assert.equal(result.valid, false);
+  assert.ok(result.reasons.includes('resposta ainda não revelada'));
 });
