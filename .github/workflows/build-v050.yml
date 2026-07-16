@@ -56,5 +56,6 @@ jobs:
             echo 'Generated files are already current.'
           else
             git commit -m 'Build unified Osler Anki Bridge v0.5.0'
+            git pull --rebase origin phase-2-android-bridge
             git push origin HEAD:phase-2-android-bridge
           fi
