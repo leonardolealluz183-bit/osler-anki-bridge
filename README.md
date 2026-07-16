@@ -54,6 +54,8 @@ Além dos testes unitários, a extração foi validada em navegador headless com
 
 O cenário produziu quatro cards válidos a partir de dois blocos, sem erros.
 
+O arquivo canônico e instalável é `docs/osler-anki-consult.user.js`. A cópia antiga em `userscript/` foi removida para não manter duas versões divergentes.
+
 ## Desenvolvimento
 
 ```bash
