@@ -10,7 +10,7 @@ const exporter = require(publishedPath);
 
 test('targets Consulta and loads before SPA navigation', () => {
   assert.match(source, /@name\s+Osler Anki Exporter — Consulta/);
-  assert.match(source, /@version\s+1\.2\.0/);
+  assert.match(source, /@version\s+1\.2\.1/);
   assert.match(source, /@match\s+https:\/\/oslermedicina\.com\.br\/\*/);
   assert.match(source, /@run-at\s+document-start/);
   assert.match(source, /pushState/);
@@ -43,6 +43,13 @@ test('contains two independent card-discovery strategies and count validation', 
   assert.match(source, /mostrando\\s\+\(\\d\+\)/);
   assert.match(source, /Exportação bloqueada/);
   assert.match(source, /cards\.length===c\.shown/);
+});
+
+test('never disables the whole panel and keeps diagnostic recovery available', () => {
+  assert.doesNotMatch(source, /querySelectorAll\(['"]button['"]\)\.forEach\([^\n]+disabled=true/);
+  assert.match(source, /function enableControls\(/);
+  assert.match(source, /data-action="copylog"/);
+  assert.match(source, /Copiar diagnóstico/);
 });
 
 test('stable hashes distinguish different cards', () => {
