@@ -1,30 +1,39 @@
 # Osler Anki Bridge
 
-Userscript Android-only que captura cards marcados como **Errei** ou **Difícil** na Osler, mantém uma fila redundante e exporta os cards para o AnkiDroid em baralhos definidos pelo assunto.
+Userscripts Android-only para capturar cards marcados como **Errei** ou **Difícil** na Osler e exportá-los para o AnkiDroid.
 
-## Versão 0.4.10 — Fase 2
+## Versão 0.4.11 — sessões nomeadas
 
-A 0.4.10 corrige o painel que bloqueava a seleção e o início dos flashcards na tela da Osler.
+A captura estável permanece no script principal 0.4.10. A camada de sessões 0.4.11 é instalada junto dele e acrescenta controles dentro do mesmo painel, sem alterar o mecanismo de captura e avanço.
 
-Correções principais:
+Com ela é possível:
 
-- o painel inicia **minimizado** por padrão;
-- a barra superior pode ser arrastada com toque, mouse ou trackpad;
-- a posição e o estado minimizado são preservados entre páginas e sessões;
-- o botão `+` abre o painel e o botão `−` o minimiza;
-- o botão `↗` devolve o painel ao canto superior direito;
-- o painel é limitado ao tamanho da tela e não pode ficar perdido fora da área visível;
-- preserva a fila redundante da 0.4.9, a recuperação de cards antigos, o avanço confirmado, os downloads e as caixas de recuperação;
-- continua usando o assunto de cada card como nome do baralho no AnkiDroid.
+- iniciar uma sessão com um nome, por exemplo `Hipertensão Arterial Sistêmica`;
+- considerar como pertencentes à sessão somente os cards novos capturados depois do início;
+- exportar um TSV contendo somente os cards daquela sessão;
+- colocar todos os cards exportados no mesmo baralho, usando o nome da sessão;
+- preservar o assunto original de cada card como tag;
+- manter os cards e backups antigos intactos;
+- encerrar uma sessão e iniciar outra sem limpar a fila principal.
 
-## Fluxo
+## Instalação
 
-1. O painel aparece como uma barra pequena: `Osler Anki Bridge 0.4.10 · N cards`.
-2. Arraste essa barra para qualquer canto livre da tela.
-3. Use `+` somente quando precisar consultar contadores, exportar ou recuperar dados.
-4. Minimize novamente com `−` antes de iniciar os flashcards.
-5. Durante o teste: **Espaço** mostra a resposta, **1** registra Errei e **2** registra Difícil.
-6. Ao terminar, abra o painel, prepare a exportação e baixe TSV e log.
+1. Mantenha instalado o script principal `docs/osler-anki-bridge.user.js` na versão 0.4.10.
+2. Instale também `docs/osler-anki-sessions.user.js`.
+3. Feche todas as abas da Osler e abra novamente.
+4. Abra o painel com `+`; o bloco **Sessão de exportação — 0.4.11** aparecerá no início.
+
+## Fluxo por tema
+
+1. Fora da sessão de flashcards, digite o nome do tema e toque em **Nova sessão**.
+2. Minimize o painel e faça os flashcards normalmente.
+3. Saia da sessão de flashcards.
+4. Abra o painel e confira o número de cards da sessão.
+5. Toque em **Preparar TSV da sessão**.
+6. Use **Baixar TSV da sessão**, **Baixar via Violentmonkey** ou **Copiar TSV**.
+7. Toque em **Encerrar sessão** antes de iniciar outro tema.
+
+O TSV da sessão não inclui os cards que já estavam na fila quando ela foi iniciada. A exportação completa e o log continuam disponíveis no painel principal.
 
 ## Desenvolvimento
 
