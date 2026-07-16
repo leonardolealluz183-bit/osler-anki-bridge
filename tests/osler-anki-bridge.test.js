@@ -25,14 +25,18 @@ function card(id, topic, question = 'Pergunta?', answer = 'Resposta') {
   };
 }
 
-test('is one monolithic v0.4.9 userscript', () => {
+test('is one monolithic v0.4.10 userscript with movable panel', () => {
   const source = fs.readFileSync(path.join(__dirname, '../userscript/osler-anki-bridge.user.js'), 'utf8');
   const published = fs.readFileSync(path.join(__dirname, '../docs/osler-anki-bridge.user.js'), 'utf8');
   assert.equal(source, published);
-  assert.match(source, /@version\s+0\.4\.9/);
+  assert.match(source, /@version\s+0\.4\.10/);
   assert.doesNotMatch(source, /@require/);
   assert.match(source, /@grant\s+GM_download/);
   assert.match(source, /@grant\s+GM_setClipboard/);
+  assert.match(source, /data-role="drag-handle"/);
+  assert.match(source, /data-action="toggle-panel"/);
+  assert.match(source, /minimized:\s*true/);
+  assert.match(source, /PANEL_STATE_KEY/);
 });
 
 test('uses the card topic as the Anki deck', () => {
@@ -90,4 +94,8 @@ test('rejects a list before its hidden answer is revealed', () => {
   });
   assert.equal(result.valid, false);
   assert.ok(result.reasons.includes('resposta ainda não revelada'));
+});
+
+test('clamps panel coordinates inside the viewport when no DOM panel exists', () => {
+  assert.deepEqual(bridge.clampPanelPosition(500, 500), { left: 12, top: 12 });
 });
