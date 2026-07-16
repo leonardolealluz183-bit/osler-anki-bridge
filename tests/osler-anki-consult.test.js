@@ -3,59 +3,57 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-global.window = globalThis;
-const exporter = require('../docs/osler-anki-consult.user.js');
+const publishedPath = path.join(__dirname, '../docs/osler-anki-consult.user.js');
+const source = fs.readFileSync(publishedPath, 'utf8');
+const exporter = require(publishedPath);
 
-function card(id, topic, frontText, backText) {
-  return {
-    id,
-    topic,
-    frontText,
-    frontHtml: `<p>${frontText}</p>`,
-    backText,
-    backHtml: backText,
-    explanationHtml: '',
-  };
-}
-
-test('loads on the whole Osler site and activates only on the consult route', () => {
-  const published = fs.readFileSync(path.join(__dirname, '../docs/osler-anki-consult.user.js'), 'utf8');
-  assert.match(published, /@version\s+1\.0\.1/);
-  assert.match(published, /@match\s+https:\/\/oslermedicina\.com\.br\/\*/);
-  assert.match(published, /@run-at\s+document-start/);
-  assert.match(published, /function onConsultRoute\(\)/);
-  assert.match(published, /hookHistory\('pushState'\)/);
-  assert.match(published, /setInterval\(routeSync, 500\)/);
-  assert.doesNotMatch(published, /@require/);
+test('targets the real Consulta mode and loads before SPA navigation', () => {
+  assert.match(source, /@name\s+Osler Anki Exporter — Consulta/);
+  assert.match(source, /@version\s+1\.1\.0/);
+  assert.match(source, /@match\s+https:\/\/oslermedicina\.com\.br\/\*/);
+  assert.match(source, /@run-at\s+document-start/);
+  assert.match(source, /@grant\s+unsafeWindow/);
+  assert.doesNotMatch(source, /Ver todos/);
+  assert.doesNotMatch(source, /@require/);
 });
 
-test('recognizes the orange tones used for revealed answers', () => {
-  assert.equal(exporter.orangeColor('rgb(255, 93, 34)'), true);
-  assert.equal(exporter.orangeColor('rgb(239, 108, 38)'), true);
-  assert.equal(exporter.orangeColor('rgb(230, 120, 70)'), true);
-  assert.equal(exporter.orangeColor('rgb(255, 255, 255)'), false);
-  assert.equal(exporter.orangeColor('rgb(55, 120, 220)'), false);
+test('detects Consulta routes without reloading the page', () => {
+  assert.equal(exporter.consultPath('/consult'), true);
+  assert.equal(exporter.consultPath('/consulta'), true);
+  assert.equal(exporter.consultPath('/flashcards'), false);
+  assert.match(source, /pushState/);
+  assert.match(source, /replaceState/);
+  assert.match(source, /MutationObserver/);
 });
 
-test('uses one explicit deck for every exported card', () => {
-  const tsv = exporter.buildTsv([
-    card('a', 'Princípios do SUS', 'O modelo [...] é universal.', 'Beveridgiano'),
-    card('b', 'Diretrizes do SUS', 'A [...] é uma diretriz.', 'Descentralização'),
-  ], 'Princípios do SUS');
+test('recognizes the orange answer color shown in Consulta', () => {
+  assert.equal(exporter.orange([255, 93, 34]), true);
+  assert.equal(exporter.orange([239, 108, 38]), true);
+  assert.equal(exporter.orange([50, 120, 220]), false);
+  assert.deepEqual(exporter.rgb('#ff5d22'), [255, 93, 34]);
+});
+
+test('expands one grouped source with three lacunas into three unique cards', () => {
+  const variants = exporter.clozeSpecs(
+    'Princípios do SUS',
+    'São princípios organizacionais: descentralização e regionalização.',
+    ['organizacionais', 'descentralização', 'regionalização'],
+  );
+  assert.equal(variants.length, 3);
+  assert.equal(new Set(variants.map((item) => item.id)).size, 3);
+});
+
+test('exports one TSV row per generated card into one explicit deck', () => {
+  const cards = [
+    { id: '1', type: 'cloze', topic: 'SUS', frontHtml: '<p>[...]</p>', backHtml: 'A', contextHtml: '', explanationHtml: '' },
+    { id: '2', type: 'qa', topic: 'SUS', frontHtml: '<p>Q?</p>', backHtml: 'R', contextHtml: '', explanationHtml: '' },
+  ];
+  const tsv = exporter.buildTsv(cards, 'Princípios do SUS');
   assert.equal((tsv.match(/\t"Princípios do SUS"/g) || []).length, 2);
-  assert.doesNotMatch(tsv, /\t"Diretrizes do SUS"\n/);
-  assert.match(tsv, /assunto_principios_do_sus/);
-  assert.match(tsv, /assunto_diretrizes_do_sus/);
+  assert.match(tsv, /tipo_cloze/);
+  assert.match(tsv, /tipo_qa/);
 });
 
-test('produces stable ids for equal content and different ids for different content', () => {
-  assert.equal(exporter.stableHash('mesmo'), exporter.stableHash('mesmo'));
-  assert.notEqual(exporter.stableHash('um'), exporter.stableHash('dois'));
-});
-
-test('sanitizes deck hierarchy separators inside TSV output', () => {
-  const tsv = exporter.buildTsv([
-    card('a', 'SUS', 'Pergunta', 'Resposta'),
-  ], 'Preventiva::SUS');
-  assert.match(tsv, /\t"Preventiva — SUS"\n/);
+test('neutralizes unintended Anki deck hierarchy separators', () => {
+  assert.equal(exporter.deckName('Preventiva::SUS'), 'Preventiva — SUS');
 });
