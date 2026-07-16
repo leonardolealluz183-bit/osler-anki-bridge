@@ -1,657 +1,511 @@
 // ==UserScript==
 // @name         Osler Anki Exporter — Ver todos
 // @namespace    https://github.com/osler-anki-bridge/osler-anki-bridge
-// @version      1.0.0
-// @description  Exporta em lote os flashcards já renderizados na tela Ver todos os flashcards da Osler para um único baralho do Anki.
-// @match        https://oslermedicina.com.br/consult*
-// @match        https://*.oslermedicina.com.br/consult*
+// @version      1.0.1
+// @description  Exporta em lote os flashcards da tela Ver todos da Osler para um único baralho do Anki, com suporte à navegação interna sem recarregar.
+// @match        https://oslermedicina.com.br/*
+// @match        https://*.oslermedicina.com.br/*
 // @grant        GM_download
 // @grant        GM_setClipboard
-// @run-at       document-idle
+// @run-at       document-start
 // @updateURL    https://raw.githubusercontent.com/leonardolealluz183-bit/osler-anki-bridge/phase-2-android-bridge/docs/osler-anki-consult.user.js
 // @downloadURL  https://raw.githubusercontent.com/leonardolealluz183-bit/osler-anki-bridge/phase-2-android-bridge/docs/osler-anki-consult.user.js
 // ==/UserScript==
 
-(function bootstrapConsultExporter() {
+(function oslerConsultExporter() {
   'use strict';
 
-  const VERSION = '1.0.0';
-  const PANEL_ID = 'osler-anki-consult-exporter-v100';
-  const LEGACY_PANEL_IDS = [
+  const VERSION = '1.0.1';
+  const PANEL_ID = 'osler-anki-consult-exporter-v101';
+  const OLD_PANEL_IDS = [
+    'osler-anki-consult-exporter-v100',
     'osler-anki-bridge-v0410',
     'osler-anki-session-controls-v0411',
     'osler-anki-session-controls-v0412',
     'osler-anki-question-fix-v0412',
   ];
-  const MAX_LOAD_MORE_CLICKS = 120;
-  const LOAD_TIMEOUT_MS = 7000;
-  const LOAD_POLL_MS = 180;
-  const CARD_MIN_WIDTH = 240;
-  const CARD_MIN_HEIGHT = 54;
+  const MAX_LOAD_MORE = 150;
+  const POLL_MS = 250;
+  const LOAD_WAIT_MS = 8000;
 
-  const pageWindow = typeof unsafeWindow !== 'undefined'
-    ? unsafeWindow
-    : (typeof window !== 'undefined' ? window : globalThis);
-  const documentRef = pageWindow.document || globalThis.document;
-
+  const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+  const doc = pageWindow.document;
   let panel = null;
-  let lastResult = { cards: [], errors: [], tsv: '', filename: '', url: '' };
+  let lastPath = '';
   let running = false;
+  let prepared = { tsv: '', filename: '', url: '', count: 0, errors: [] };
 
   const sleep = (ms) => new Promise((resolve) => pageWindow.setTimeout(resolve, ms));
-  const normalizeWhitespace = (value) => String(value || '').replace(/\s+/g, ' ').trim();
-  const normalizeText = (value) => normalizeWhitespace(value)
-    .normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  const cleanText = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const fold = (value) => cleanText(value).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
   const escapeHtml = (value) => String(value || '')
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
-  function stableHash(input) {
+  function onConsultRoute() {
+    return /^\/consult(?:\/|$)/i.test(String(pageWindow.location?.pathname || ''));
+  }
+
+  function stableHash(value) {
     let hash = 2166136261;
-    const text = String(input || '');
-    for (let index = 0; index < text.length; index += 1) {
-      hash ^= text.charCodeAt(index);
+    for (const char of String(value || '')) {
+      hash ^= char.charCodeAt(0);
       hash = Math.imul(hash, 16777619);
     }
     return (hash >>> 0).toString(36);
   }
 
-  function slugify(value, max = 70) {
-    return normalizeText(value).replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, max) || 'osler';
+  function slug(value, max = 72) {
+    return fold(value).replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, max) || 'osler';
   }
 
-  function safeDeckName(value) {
-    return normalizeWhitespace(value).replace(/::+/g, ' — ').replace(/[\t\r\n]+/g, ' ').slice(0, 120) || 'Osler';
+  function deckName(value) {
+    return cleanText(value).replace(/::+/g, ' — ').replace(/[\t\r\n]+/g, ' ').slice(0, 120) || 'Osler';
   }
 
-  function parseCssColor(value) {
-    const input = String(value || '').trim();
-    const rgb = input.match(/rgba?\(\s*(\d+(?:\.\d+)?)\s*[, ]\s*(\d+(?:\.\d+)?)\s*[, ]\s*(\d+(?:\.\d+)?)/i);
-    if (rgb) return rgb.slice(1, 4).map(Number);
-    const hex = input.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
-    if (!hex) return null;
-    const raw = hex[1].length === 3 ? hex[1].split('').map((part) => part + part).join('') : hex[1];
-    return [0, 2, 4].map((offset) => Number.parseInt(raw.slice(offset, offset + 2), 16));
+  function computed(element) {
+    try { return pageWindow.getComputedStyle(element); } catch (_error) { return null; }
   }
 
-  function isOrangeRgb(rgb) {
-    if (!Array.isArray(rgb) || rgb.length < 3) return false;
-    const [red, green, blue] = rgb.map(Number);
-    if (![red, green, blue].every(Number.isFinite)) return false;
-    return red >= 175 && green >= 45 && green <= 175 && blue <= 115
-      && red >= green + 55 && red >= blue + 85;
-  }
-
-  function styleFor(element) {
-    try { return pageWindow.getComputedStyle?.(element) || null; }
-    catch (_error) { return null; }
-  }
-
-  function isVisible(element) {
+  function visible(element) {
     if (!element || element.hidden || element.closest?.('[hidden],[aria-hidden="true"],[inert]')) return false;
-    const style = styleFor(element);
+    const style = computed(element);
     if (style && (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0)) return false;
     const rect = element.getBoundingClientRect?.();
-    if (!rect) return true;
-    return Number(rect.width) > 0 && Number(rect.height) > 0;
+    return !rect || (Number(rect.width) > 0 && Number(rect.height) > 0);
   }
 
-  function hasOrangeBorder(element) {
-    const style = styleFor(element);
-    if (!style) return false;
-    const sides = ['Top', 'Right', 'Bottom', 'Left'];
-    return sides.some((side) => {
-      const width = Number.parseFloat(style[`border${side}Width`] || '0');
-      return width > 0 && isOrangeRgb(parseCssColor(style[`border${side}Color`]));
-    });
+  function rgb(value) {
+    const match = String(value || '').match(/rgba?\(\s*(\d+(?:\.\d+)?)\D+(\d+(?:\.\d+)?)\D+(\d+(?:\.\d+)?)/i);
+    return match ? match.slice(1, 4).map(Number) : null;
   }
 
-  function hasAnswerHint(element) {
+  function orangeColor(value) {
+    const color = rgb(value);
+    if (!color) return false;
+    const [r, g, b] = color;
+    return r >= 170 && g >= 35 && g <= 185 && b <= 130 && r >= g + 40 && r >= b + 65;
+  }
+
+  function answerHint(element) {
     const signature = [
-      element?.className,
-      element?.id,
-      element?.getAttribute?.('data-testid'),
-      element?.getAttribute?.('data-type'),
-      element?.getAttribute?.('data-answer'),
-      element?.getAttribute?.('aria-label'),
+      element?.className, element?.id, element?.getAttribute?.('data-testid'),
+      element?.getAttribute?.('data-answer'), element?.getAttribute?.('aria-label'),
     ].map(String).join(' ');
     return /cloze|answer|resposta|highlight|correct/i.test(signature);
   }
 
-  function isOrangeAnswerNode(element) {
-    if (!element || !isVisible(element)) return false;
-    const text = normalizeWhitespace(element.textContent);
-    if (!text || text.length > 400) return false;
+  function answerNode(element) {
+    if (!visible(element)) return false;
+    const text = cleanText(element.textContent);
+    if (!text || text.length > 500) return false;
     const tag = String(element.tagName || '').toLowerCase();
-    if (!['span', 'strong', 'b', 'mark', 'em', 'i', 'u', 'small', 'code'].includes(tag) && !hasAnswerHint(element)) return false;
-    const style = styleFor(element);
-    const orangeText = isOrangeRgb(parseCssColor(style?.color));
-    const orangeBackground = isOrangeRgb(parseCssColor(style?.backgroundColor));
-    return orangeText || orangeBackground || hasAnswerHint(element);
+    if (!['span', 'strong', 'b', 'mark', 'em', 'i', 'u', 'small', 'code'].includes(tag) && !answerHint(element)) return false;
+    const style = computed(element);
+    return answerHint(element) || orangeColor(style?.color) || orangeColor(style?.backgroundColor);
   }
 
-  function isLikelyCitationNode(element, root) {
-    if (!element || element === root) return false;
-    const text = normalizeWhitespace(element.textContent);
-    if (!text || text.length < 18 || text.length > 700) return false;
-    const style = styleFor(element);
-    const italic = String(style?.fontStyle || '').toLowerCase() === 'italic'
-      || Boolean(element.closest?.('em,i'))
-      || ['em', 'i'].includes(String(element.tagName || '').toLowerCase());
+  function orangeBorder(element) {
+    const style = computed(element);
+    if (!style) return false;
+    return ['Top', 'Right', 'Bottom', 'Left'].some((side) => {
+      const width = Number.parseFloat(style[`border${side}Width`] || '0');
+      return width > 0 && orangeColor(style[`border${side}Color`]);
+    });
+  }
+
+  function likelyCard(element) {
+    if (!visible(element) || element.id === PANEL_ID || element.closest?.(`#${PANEL_ID}`)) return false;
+    if (!/^(ARTICLE|SECTION|DIV|LI)$/.test(String(element.tagName || ''))) return false;
+    const text = cleanText(element.textContent);
+    if (text.length < 18 || text.length > 15000) return false;
     const rect = element.getBoundingClientRect?.();
-    const rootRect = root?.getBoundingClientRect?.();
-    const nearBottom = rect && rootRect ? Number(rect.bottom) >= Number(rootRect.bottom) - Math.max(80, Number(rootRect.height) * 0.35) : false;
-    const explicit = /\b(fonte|refer[eê]ncia|doi|uptodate|diretriz|guideline|manual|tratado|pol[ií]ticas? de sa[uú]de)\b/i.test(text);
-    return (italic && nearBottom) || explicit;
+    if (rect && (Number(rect.width) < 220 || Number(rect.height) < 50)) return false;
+    return orangeBorder(element) || Array.from(element.querySelectorAll?.('*') || []).some(answerNode);
   }
 
-  function cardContainerScore(element) {
-    if (!element || !isVisible(element) || element.id === PANEL_ID || element.closest?.(`#${PANEL_ID}`)) return -Infinity;
-    const tag = String(element.tagName || '').toLowerCase();
-    if (!['article', 'section', 'div', 'li'].includes(tag)) return -Infinity;
-    const rect = element.getBoundingClientRect?.();
-    if (rect && (Number(rect.width) < CARD_MIN_WIDTH || Number(rect.height) < CARD_MIN_HEIGHT)) return -Infinity;
-    const text = normalizeWhitespace(element.textContent);
-    if (text.length < 18 || text.length > 12000) return -Infinity;
-    const directCardChildren = Array.from(element.children || []).filter((child) => hasOrangeBorder(child));
-    if (directCardChildren.length >= 2) return -Infinity;
-    let score = 0;
-    if (hasOrangeBorder(element)) score += 130;
-    const orangeAnswers = Array.from(element.querySelectorAll?.('*') || []).filter(isOrangeAnswerNode).length;
-    if (orangeAnswers) score += Math.min(60, orangeAnswers * 15);
-    const links = Array.from(element.querySelectorAll?.('a') || []).filter(isVisible);
-    if (links.length >= 2 && links.length <= 8) score += 25;
-    if (element.querySelector?.('strong,b')) score += 20;
-    if (rect) {
-      score += Math.min(25, Number(rect.width) / 80);
-      score -= Math.max(0, Number(rect.height) - 1000) / 30;
-    }
-    return score;
-  }
-
-  function nearestCardAncestor(node) {
+  function nearestCard(node) {
     let current = node;
-    let best = null;
-    let bestScore = -Infinity;
-    for (let depth = 0; current && current !== documentRef?.body && depth < 12; depth += 1) {
-      const score = cardContainerScore(current);
-      if (score > bestScore) {
-        best = current;
-        bestScore = score;
-      }
-      if (score >= 150 && hasOrangeBorder(current)) break;
+    let fallback = null;
+    for (let depth = 0; current && current !== doc.body && depth < 12; depth += 1) {
+      if (likelyCard(current)) fallback = current;
+      if (orangeBorder(current) && likelyCard(current)) return current;
       current = current.parentElement;
     }
-    return bestScore >= 75 ? best : null;
+    return fallback;
   }
 
-  function detectCardRoots(doc = documentRef) {
+  function cardRoots() {
     const roots = new Set();
-    Array.from(doc.querySelectorAll?.('article,section,div,li') || []).forEach((candidate) => {
-      if (cardContainerScore(candidate) >= 150 && hasOrangeBorder(candidate)) roots.add(candidate);
+    Array.from(doc.querySelectorAll('article,section,div,li')).forEach((node) => {
+      if (orangeBorder(node) && likelyCard(node)) roots.add(node);
     });
-    Array.from(doc.querySelectorAll?.('span,strong,b,mark,em,i,[class*="cloze" i],[class*="answer" i]') || [])
-      .filter(isOrangeAnswerNode)
-      .forEach((answer) => {
-        const root = nearestCardAncestor(answer);
+    Array.from(doc.querySelectorAll('span,strong,b,mark,em,i,u,small,code,[class*="cloze" i],[class*="answer" i]'))
+      .filter(answerNode)
+      .forEach((node) => {
+        const root = nearestCard(node);
         if (root) roots.add(root);
       });
-
-    const ordered = Array.from(roots).sort((first, second) => {
-      if (first === second) return 0;
-      const relation = first.compareDocumentPosition?.(second) || 0;
-      if (relation & (pageWindow.Node?.DOCUMENT_POSITION_FOLLOWING || 4)) return -1;
-      if (relation & (pageWindow.Node?.DOCUMENT_POSITION_PRECEDING || 2)) return 1;
-      return 0;
-    });
-
-    return ordered.filter((root) => !ordered.some((other) => other !== root && root.contains?.(other) && hasOrangeBorder(other)));
+    const list = Array.from(roots);
+    return list.filter((root) => !list.some((other) => other !== root && root.contains(other) && orangeBorder(other)));
   }
 
-  function uniqueTopLevel(nodes) {
+  function citationNode(element, root) {
+    const text = cleanText(element?.textContent);
+    if (!text || text.length < 15 || text.length > 900) return false;
+    const style = computed(element);
+    const italic = style?.fontStyle === 'italic' || Boolean(element.closest?.('em,i'));
+    const explicit = /\b(fonte|refer[eê]ncia|doi|uptodate|diretriz|guideline|manual|tratado|pol[ií]ticas? de sa[uú]de)\b/i.test(text);
+    const rect = element.getBoundingClientRect?.();
+    const rootRect = root.getBoundingClientRect?.();
+    const low = rect && rootRect ? Number(rect.top) > Number(rootRect.top) + Number(rootRect.height) * 0.55 : false;
+    return explicit || (italic && low);
+  }
+
+  function topLevel(nodes) {
     const list = Array.from(new Set(nodes.filter(Boolean)));
-    return list.filter((node) => !list.some((other) => other !== node && other.contains?.(node)));
+    return list.filter((node) => !list.some((other) => other !== node && other.contains(node)));
   }
 
-  function breadcrumbInfo(root) {
-    const candidates = Array.from(root.querySelectorAll?.('nav,ol,ul,div,p') || []).filter((element) => {
-      if (!isVisible(element)) return false;
-      const text = normalizeWhitespace(element.textContent);
-      const links = Array.from(element.querySelectorAll?.('a') || []).filter(isVisible);
-      return text.length > 3 && text.length < 260 && links.length >= 2 && links.length <= 8;
-    }).sort((first, second) => {
-      const firstRect = first.getBoundingClientRect?.();
-      const secondRect = second.getBoundingClientRect?.();
-      return Number(firstRect?.top || 0) - Number(secondRect?.top || 0);
+  function breadcrumb(root) {
+    const candidates = Array.from(root.querySelectorAll('nav,ol,ul,div')).filter((node) => {
+      if (!visible(node)) return false;
+      const links = Array.from(node.querySelectorAll('a')).filter(visible);
+      const text = cleanText(node.textContent);
+      return links.length >= 2 && links.length <= 8 && text.length < 300;
     });
     const node = candidates[0] || null;
-    const parts = node
-      ? Array.from(node.querySelectorAll?.('a') || []).map((link) => normalizeWhitespace(link.textContent)).filter(Boolean)
-      : [];
-    return { node, parts, topic: parts.at(-1) || '' };
+    const parts = node ? Array.from(node.querySelectorAll('a')).map((a) => cleanText(a.textContent)).filter(Boolean) : [];
+    return { node, topic: parts.at(-1) || '' };
   }
 
-  function commonAncestor(nodes, stopAt) {
-    if (!nodes.length) return null;
-    let current = nodes[0];
-    while (current && current !== stopAt) {
-      if (nodes.every((node) => current.contains?.(node))) return current;
-      current = current.parentElement;
-    }
-    return null;
-  }
-
-  function blockCandidates(root) {
-    const selectors = 'p,li,blockquote,table,ul,ol,h1,h2,h3,h4,h5,h6,div';
-    const nodes = Array.from(root.querySelectorAll?.(selectors) || []).filter((node) => {
-      if (!isVisible(node) || node === root || node.closest?.(`#${PANEL_ID}`)) return false;
-      const text = normalizeWhitespace(node.textContent);
-      if (!text && !node.querySelector?.('img')) return false;
-      if (text.length > 2500) return false;
-      const childBlocks = Array.from(node.children || []).filter((child) => /^(P|LI|BLOCKQUOTE|TABLE|UL|OL|H[1-6]|DIV)$/i.test(String(child.tagName || '')) && normalizeWhitespace(child.textContent));
-      return childBlocks.length <= 3;
-    });
-    return uniqueTopLevel(nodes);
-  }
-
-  function chooseQuestionBlock(root, answerNodes, breadcrumbNode, citationNodes) {
-    if (answerNodes.length) {
-      const ancestor = commonAncestor(answerNodes, root);
-      let current = ancestor;
-      while (current && current !== root) {
-        const tag = String(current.tagName || '').toLowerCase();
-        const text = normalizeWhitespace(current.textContent);
-        if (['p', 'li', 'blockquote', 'td', 'th'].includes(tag) && text.length >= 8 && text.length <= 1600) return current;
-        if (tag === 'div' && text.length >= 8 && text.length <= 900 && current.querySelector?.('strong,b')) return current;
-        current = current.parentElement;
-      }
-    }
-
-    const citations = new Set(citationNodes);
-    const candidates = blockCandidates(root).filter((node) => {
-      if (breadcrumbNode && (node === breadcrumbNode || breadcrumbNode.contains?.(node) || node.contains?.(breadcrumbNode))) return false;
-      if (Array.from(citations).some((citation) => node === citation || citation.contains?.(node))) return false;
-      const text = normalizeWhitespace(node.textContent);
-      if (text.length < 10) return false;
-      return Boolean(node.querySelector?.('strong,b')) || /\?$/.test(text);
-    });
-    return candidates[0] || null;
-  }
-
-  function cleanClone(node) {
+  function cloneClean(node) {
     const clone = node?.cloneNode?.(true);
     if (!clone) return null;
-    clone.querySelectorAll?.('script,style,button,svg,[role="button"],[aria-label*="menu" i]').forEach((item) => item.remove());
+    clone.querySelectorAll?.('script,style,button,svg,[role="button"]').forEach((item) => item.remove());
     clone.querySelectorAll?.('[id]').forEach((item) => item.removeAttribute('id'));
     clone.querySelectorAll?.('*').forEach((item) => {
-      Array.from(item.attributes || []).forEach((attr) => {
-        if (/^on/i.test(attr.name)) item.removeAttribute(attr.name);
-      });
+      Array.from(item.attributes || []).forEach((attr) => { if (/^on/i.test(attr.name)) item.removeAttribute(attr.name); });
     });
     return clone;
   }
 
-  function htmlOf(node) {
-    if (!node) return '';
-    const tag = String(node.tagName || '').toLowerCase();
-    return ['p', 'li', 'blockquote', 'table', 'ul', 'ol'].includes(tag) ? node.outerHTML : node.innerHTML;
+  function blocks(root) {
+    return topLevel(Array.from(root.querySelectorAll('p,li,blockquote,table,ul,ol,h1,h2,h3,h4,h5,h6,div')).filter((node) => {
+      if (!visible(node) || node === root || node.closest?.(`#${PANEL_ID}`)) return false;
+      const text = cleanText(node.textContent);
+      if (!text || text.length > 3000) return false;
+      const children = Array.from(node.children || []).filter((child) => /^(P|LI|BLOCKQUOTE|TABLE|UL|OL|H[1-6]|DIV)$/.test(String(child.tagName || '')) && cleanText(child.textContent));
+      return children.length <= 3;
+    }));
   }
 
-  function parseCardRoot(root, index = 0) {
-    const errors = [];
-    const breadcrumb = breadcrumbInfo(root);
-    const citationNodes = uniqueTopLevel(Array.from(root.querySelectorAll?.('p,div,small,em,i') || [])
-      .filter((node) => isLikelyCitationNode(node, root)));
-    const answerNodes = uniqueTopLevel(Array.from(root.querySelectorAll?.('*') || [])
-      .filter((node) => isOrangeAnswerNode(node))
-      .filter((node) => !breadcrumb.node?.contains?.(node))
-      .filter((node) => !citationNodes.some((citation) => citation.contains?.(node))));
-    const questionBlock = chooseQuestionBlock(root, answerNodes, breadcrumb.node, citationNodes);
-    if (!questionBlock) return { card: null, error: `Card ${index + 1}: pergunta não identificada.` };
+  function html(node) {
+    if (!node) return '';
+    return /^(P|LI|BLOCKQUOTE|TABLE|UL|OL)$/.test(String(node.tagName || '')) ? node.outerHTML : node.innerHTML;
+  }
 
-    const questionClone = cleanClone(questionBlock);
-    if (!questionClone) return { card: null, error: `Card ${index + 1}: não foi possível copiar a pergunta.` };
+  function parseCard(root, index) {
+    const crumbs = breadcrumb(root);
+    const citations = topLevel(Array.from(root.querySelectorAll('p,div,small,em,i')).filter((node) => citationNode(node, root)));
+    const answers = topLevel(Array.from(root.querySelectorAll('*')).filter(answerNode)
+      .filter((node) => !crumbs.node?.contains(node))
+      .filter((node) => !citations.some((citation) => citation.contains(node))));
 
-    const answerTexts = [];
-    const answerHtml = [];
-    if (answerNodes.length) {
-      const originalAnswers = Array.from(questionBlock.querySelectorAll?.('*') || []).filter((node) => answerNodes.includes(node));
-      const cloneAnswers = Array.from(questionClone.querySelectorAll?.('*') || []).filter((node) => isOrangeAnswerNode(node));
-      answerNodes.forEach((node) => {
-        const text = normalizeWhitespace(node.textContent);
-        if (text && !answerTexts.includes(text)) answerTexts.push(text);
-        const cleaned = cleanClone(node);
-        const html = normalizeWhitespace(cleaned?.innerHTML || cleaned?.textContent);
-        if (html && !answerHtml.includes(html)) answerHtml.push(html);
-      });
-      const replacements = cloneAnswers.length ? cloneAnswers : Array.from(questionClone.querySelectorAll?.('span,strong,b,mark,em,i') || [])
-        .filter((node) => answerTexts.includes(normalizeWhitespace(node.textContent)));
-      replacements.forEach((node) => node.replaceWith(documentRef.createTextNode('[...]')));
-      if (!originalAnswers.length && !replacements.length) errors.push('resposta destacada fora do bloco principal');
-    }
-
-    const blocks = blockCandidates(root).filter((node) => {
-      if (node === questionBlock || questionBlock.contains?.(node) || node.contains?.(questionBlock)) return false;
-      if (breadcrumb.node && (node === breadcrumb.node || breadcrumb.node.contains?.(node) || node.contains?.(breadcrumb.node))) return false;
-      if (citationNodes.some((citation) => node === citation || citation.contains?.(node) || node.contains?.(citation))) return false;
-      return true;
-    });
-
-    let answerBlock = null;
-    if (!answerTexts.length) {
-      const afterQuestion = blocks.filter((node) => {
-        const relation = questionBlock.compareDocumentPosition?.(node) || 0;
-        return Boolean(relation & (pageWindow.Node?.DOCUMENT_POSITION_FOLLOWING || 4));
-      });
-      answerBlock = afterQuestion[0] || null;
-      if (answerBlock) {
-        answerTexts.push(normalizeWhitespace(answerBlock.textContent));
-        const cleaned = cleanClone(answerBlock);
-        answerHtml.push(htmlOf(cleaned));
+    let question = null;
+    if (answers.length) {
+      let current = answers[0];
+      while (current && current !== root) {
+        const text = cleanText(current.textContent);
+        if (/^(P|LI|BLOCKQUOTE|TD|TH)$/.test(String(current.tagName || '')) && text.length >= 8 && text.length <= 1800) {
+          question = current;
+          break;
+        }
+        current = current.parentElement;
       }
     }
+    const allBlocks = blocks(root);
+    if (!question) {
+      question = allBlocks.find((node) => {
+        if (crumbs.node && (node === crumbs.node || node.contains(crumbs.node) || crumbs.node.contains(node))) return false;
+        if (citations.some((citation) => node === citation || citation.contains(node))) return false;
+        const text = cleanText(node.textContent);
+        return text.length >= 10 && (node.querySelector('strong,b') || /\?$/.test(text));
+      }) || null;
+    }
+    if (!question) return { error: `Card ${index + 1}: pergunta não identificada.` };
 
-    const explanationBlocks = blocks.filter((node) => node !== answerBlock).filter((node) => {
-      const relation = questionBlock.compareDocumentPosition?.(node) || 0;
-      return Boolean(relation & (pageWindow.Node?.DOCUMENT_POSITION_FOLLOWING || 4));
-    }).slice(0, 12);
-    const explanationHtml = explanationBlocks.map((node) => htmlOf(cleanClone(node))).filter(Boolean).join('\n');
+    const frontClone = cloneClean(question);
+    if (!frontClone) return { error: `Card ${index + 1}: falha ao copiar a pergunta.` };
+    const answerTexts = [];
+    const answerHtml = [];
+    answers.forEach((node) => {
+      const text = cleanText(node.textContent);
+      if (text && !answerTexts.includes(text)) answerTexts.push(text);
+      const cloned = cloneClean(node);
+      const value = cleanText(cloned?.innerHTML || cloned?.textContent);
+      if (value && !answerHtml.includes(value)) answerHtml.push(value);
+    });
+    Array.from(frontClone.querySelectorAll('*')).filter(answerNode).forEach((node) => node.replaceWith(doc.createTextNode('[...]')));
 
-    const frontText = normalizeWhitespace(questionClone.textContent);
-    const frontHtml = htmlOf(questionClone);
-    const backText = normalizeWhitespace(answerTexts.join('; '));
-    const backHtml = answerHtml.filter(Boolean).join('<br>') || escapeHtml(backText);
-    if (!frontText) return { card: null, error: `Card ${index + 1}: frente vazia.` };
-    if (!backText && !backHtml) return { card: null, error: `Card ${index + 1}: resposta não identificada.` };
+    let answerBlock = null;
+    const usable = allBlocks.filter((node) => {
+      if (node === question || node.contains(question) || question.contains(node)) return false;
+      if (crumbs.node && (node === crumbs.node || node.contains(crumbs.node) || crumbs.node.contains(node))) return false;
+      if (citations.some((citation) => node === citation || citation.contains(node) || node.contains(citation))) return false;
+      return true;
+    });
+    if (!answerTexts.length) {
+      answerBlock = usable.find((node) => Boolean(question.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)) || null;
+      if (answerBlock) {
+        answerTexts.push(cleanText(answerBlock.textContent));
+        answerHtml.push(html(cloneClean(answerBlock)));
+      }
+    }
+    const explanation = usable.filter((node) => node !== answerBlock)
+      .filter((node) => Boolean(question.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING))
+      .slice(0, 12).map((node) => html(cloneClean(node))).filter(Boolean).join('\n');
 
-    const strongTopic = normalizeWhitespace(questionBlock.querySelector?.('strong,b')?.textContent).replace(/[\s.:;,!?–—-]+$/u, '');
-    const topic = breadcrumb.topic || strongTopic || 'Osler';
+    const frontText = cleanText(frontClone.textContent);
+    const backText = cleanText(answerTexts.join('; '));
+    if (!frontText) return { error: `Card ${index + 1}: frente vazia.` };
+    if (!backText) return { error: `Card ${index + 1}: resposta não identificada.` };
+    const strongTopic = cleanText(question.querySelector?.('strong,b')?.textContent).replace(/[\s.:;,!?–—-]+$/u, '');
+    const topic = crumbs.topic || strongTopic || 'Osler';
     const id = stableHash([topic, frontText, backText].join('\n---\n'));
-    const card = {
-      id,
-      topic,
-      frontText,
-      frontHtml,
-      backText,
-      backHtml,
-      explanationHtml,
-      warnings: errors,
+    return {
+      card: {
+        id, topic, frontText, frontHtml: html(frontClone), backText,
+        backHtml: answerHtml.filter(Boolean).join('<br>') || escapeHtml(backText),
+        explanationHtml: explanation,
+      },
     };
-    return { card, error: null };
   }
 
-  function dedupeCards(cards) {
-    const byId = new Map();
-    cards.forEach((card) => {
-      if (card?.id && !byId.has(card.id)) byId.set(card.id, card);
+  function analyze() {
+    const roots = cardRoots();
+    const cards = [];
+    const errors = [];
+    const ids = new Set();
+    roots.forEach((root, index) => {
+      const result = parseCard(root, index);
+      if (result.error) errors.push(result.error);
+      if (result.card && !ids.has(result.card.id)) {
+        ids.add(result.card.id);
+        cards.push(result.card);
+      }
     });
-    return Array.from(byId.values());
+    return { roots: roots.length, cards, errors };
   }
 
   function tsvField(value) {
-    const normalized = String(value || '').replace(/\r?\n/g, '<br>').replace(/\t/g, ' ');
-    return `"${normalized.replace(/"/g, '""')}"`;
+    return `"${String(value || '').replace(/\r?\n/g, '<br>').replace(/\t/g, ' ').replace(/"/g, '""')}"`;
   }
 
-  function buildTsv(cards, deckName) {
-    const deck = safeDeckName(deckName);
-    const sessionTag = `osler_consult_${slugify(deck)}`;
-    const headers = [
-      '#separator:Tab',
-      '#html:true',
-      '#tags:osler',
-      '#columns:Frente\tVerso\tTags\tBaralho',
-      '#tags column:3',
-      '#deck column:4',
-    ];
-    const rows = dedupeCards(cards).map((card) => {
+  function buildTsv(cards, name) {
+    const deck = deckName(name);
+    const headers = ['#separator:Tab', '#html:true', '#tags:osler', '#columns:Frente\tVerso\tTags\tBaralho', '#tags column:3', '#deck column:4'];
+    const rows = cards.map((card) => {
       const front = `<span style="display:none">osler:${escapeHtml(card.id)}</span>${card.frontHtml || escapeHtml(card.frontText)}`;
       const explanation = card.explanationHtml ? `<hr><div><strong>Explicação</strong><br>${card.explanationHtml}</div>` : '';
-      const back = `<div><strong>Resposta</strong><br>${card.backHtml || escapeHtml(card.backText)}</div>${explanation}<hr><small>Assunto original: ${escapeHtml(card.topic)} · ID: ${escapeHtml(card.id)}</small>`;
-      const tags = `osler ${sessionTag} assunto_${slugify(card.topic)}`;
-      return [front, back, tags, deck].map(tsvField).join('\t');
+      const back = `<div><strong>Resposta</strong><br>${card.backHtml}</div>${explanation}<hr><small>Assunto original: ${escapeHtml(card.topic)} · ID: ${escapeHtml(card.id)}</small>`;
+      return [front, back, `osler osler_consult_${slug(deck)} assunto_${slug(card.topic)}`, deck].map(tsvField).join('\t');
     });
     return `\uFEFF${[...headers, ...rows].join('\n')}\n`;
   }
 
-  function findLoadMoreButton(doc = documentRef) {
-    return Array.from(doc.querySelectorAll?.('button,[role="button"],a') || []).find((element) => {
-      if (!isVisible(element)) return false;
-      const text = normalizeText([element.textContent, element.getAttribute?.('aria-label'), element.getAttribute?.('title')].filter(Boolean).join(' '));
-      return text === 'carregar mais' || text.includes('carregar mais');
+  function loadMoreButton() {
+    return Array.from(doc.querySelectorAll('button,[role="button"],a')).find((element) => {
+      if (!visible(element)) return false;
+      const text = fold([element.textContent, element.getAttribute?.('aria-label'), element.getAttribute?.('title')].filter(Boolean).join(' '));
+      return text.includes('carregar mais');
     }) || null;
   }
 
-  async function waitForMoreCards(previousCount) {
-    const startedAt = Date.now();
-    while (Date.now() - startedAt < LOAD_TIMEOUT_MS) {
-      await sleep(LOAD_POLL_MS);
-      const current = detectCardRoots(documentRef).length;
-      if (current > previousCount) return { grew: true, count: current };
-      if (!findLoadMoreButton(documentRef)) return { grew: current > previousCount, count: current };
-    }
-    return { grew: false, count: detectCardRoots(documentRef).length };
-  }
-
-  async function loadAllCards(onProgress = () => {}) {
+  async function loadAll(progress) {
     let clicks = 0;
+    let previous = cardRoots().length;
     let stagnant = 0;
-    let count = detectCardRoots(documentRef).length;
-    onProgress(`Encontrados ${count} cartões visíveis.`);
-    while (clicks < MAX_LOAD_MORE_CLICKS) {
-      const button = findLoadMoreButton(documentRef);
+    progress(`Encontrados ${previous} cards visíveis.`);
+    while (clicks < MAX_LOAD_MORE) {
+      const button = loadMoreButton();
       if (!button) break;
       button.scrollIntoView?.({ block: 'center', behavior: 'auto' });
-      await sleep(80);
-      const before = count;
+      await sleep(100);
       button.click();
       clicks += 1;
-      const result = await waitForMoreCards(before);
-      count = result.count;
-      onProgress(`Carregando: ${count} cartões encontrados.`);
-      if (!result.grew) stagnant += 1;
-      else stagnant = 0;
+      const started = Date.now();
+      let current = previous;
+      while (Date.now() - started < LOAD_WAIT_MS) {
+        await sleep(POLL_MS);
+        current = cardRoots().length;
+        if (current > previous || !loadMoreButton()) break;
+      }
+      progress(`Carregando: ${current} cards encontrados.`);
+      if (current <= previous) stagnant += 1; else stagnant = 0;
+      previous = current;
       if (stagnant >= 2) break;
     }
-    return { count, clicks, complete: !findLoadMoreButton(documentRef) };
+    return { count: previous, complete: !loadMoreButton(), clicks };
   }
 
-  function analyzeVisibleCards(deckName) {
-    const roots = detectCardRoots(documentRef);
-    const cards = [];
-    const errors = [];
-    roots.forEach((root, index) => {
-      const parsed = parseCardRoot(root, index);
-      if (parsed.card) cards.push(parsed.card);
-      if (parsed.error) errors.push(parsed.error);
-    });
-    const unique = dedupeCards(cards);
-    const tsv = buildTsv(unique, deckName);
-    const filename = `osler-${slugify(deckName).replace(/_/g, '-')}-${unique.length}-cards.tsv`;
-    return { roots: roots.length, cards: unique, errors, tsv, filename };
-  }
-
-  function revokeLastUrl() {
-    if (!lastResult.url) return;
-    try { pageWindow.URL.revokeObjectURL(lastResult.url); } catch (_error) { /* sem ação */ }
-  }
-
-  function setStatus(text, state = '') {
-    const target = panel?.querySelector?.('[data-role="status"]');
+  function status(message, kind = '') {
+    const target = panel?.querySelector('[data-role="status"]');
     if (!target) return;
-    target.textContent = text;
-    target.dataset.state = state;
-    target.style.color = state === 'error' ? '#ff8a80' : state === 'ok' ? '#9ccc65' : 'inherit';
+    target.textContent = message;
+    target.style.color = kind === 'error' ? '#ff8a80' : kind === 'ok' ? '#9ccc65' : '#eee';
   }
 
-  function renderResult(result) {
-    revokeLastUrl();
-    const url = pageWindow.URL.createObjectURL(new pageWindow.Blob([result.tsv], { type: 'text/tab-separated-values;charset=utf-8' }));
-    lastResult = { ...result, url };
-    const download = panel?.querySelector?.('[data-role="download"]');
-    const raw = panel?.querySelector?.('[data-role="raw"]');
-    const log = panel?.querySelector?.('[data-role="log"]');
-    if (download) {
-      download.href = url;
-      download.download = result.filename;
-      download.hidden = result.cards.length === 0;
-      download.textContent = `Baixar TSV (${result.cards.length})`;
-    }
-    if (raw) raw.value = result.tsv;
-    if (log) {
-      const warnings = result.cards.flatMap((card) => card.warnings.map((warning) => `${card.topic}: ${warning}`));
-      log.value = [
-        `Versão: ${VERSION}`,
-        `Contêineres encontrados: ${result.roots}`,
-        `Cards válidos e únicos: ${result.cards.length}`,
-        `Erros: ${result.errors.length}`,
-        ...result.errors,
-        ...warnings.map((warning) => `Aviso: ${warning}`),
-      ].join('\n');
-    }
-    setStatus(`${result.cards.length} cards prontos para o baralho “${safeDeckName(panel?.querySelector?.('[data-role="deck"]')?.value)}”.${result.errors.length ? ` ${result.errors.length} não foram lidos; veja o diagnóstico.` : ''}`, result.cards.length ? 'ok' : 'error');
+  function clearPreparedUrl() {
+    if (prepared.url) pageWindow.URL.revokeObjectURL(prepared.url);
+    prepared.url = '';
   }
 
-  async function runAnalyze(loadEverything) {
+  function render(result, name) {
+    clearPreparedUrl();
+    const tsv = buildTsv(result.cards, name);
+    const filename = `osler-${slug(name).replace(/_/g, '-')}-${result.cards.length}-cards.tsv`;
+    const url = pageWindow.URL.createObjectURL(new Blob([tsv], { type: 'text/tab-separated-values;charset=utf-8' }));
+    prepared = { ...result, tsv, filename, url, count: result.cards.length };
+    const link = panel.querySelector('[data-role="download"]');
+    link.href = url;
+    link.download = filename;
+    link.hidden = result.cards.length === 0;
+    link.textContent = `Baixar TSV (${result.cards.length})`;
+    panel.querySelector('[data-role="raw"]').value = tsv;
+    panel.querySelector('[data-role="log"]').value = [
+      `Versão: ${VERSION}`, `Rota: ${pageWindow.location.pathname}`,
+      `Contêineres encontrados: ${result.roots}`, `Cards válidos e únicos: ${result.cards.length}`,
+      `Erros: ${result.errors.length}`, ...result.errors,
+    ].join('\n');
+    status(`${result.cards.length} cards prontos para “${deckName(name)}”.${result.errors.length ? ` ${result.errors.length} cards não foram lidos; abra o diagnóstico.` : ''}`, result.cards.length ? 'ok' : 'error');
+  }
+
+  async function run(loadEverything) {
     if (running) return;
+    const input = panel.querySelector('[data-role="deck"]');
+    if (!input.value.trim()) return status('Digite o nome do baralho.', 'error');
     running = true;
-    const buttons = panel?.querySelectorAll?.('button');
-    buttons?.forEach((button) => { button.disabled = true; });
+    panel.querySelectorAll('button').forEach((button) => { button.disabled = true; });
     try {
-      const deckInput = panel?.querySelector?.('[data-role="deck"]');
-      const deck = safeDeckName(deckInput?.value);
-      if (!deckInput?.value?.trim()) throw new Error('Digite o nome do baralho antes de exportar.');
       if (loadEverything) {
-        setStatus('Carregando todos os flashcards…');
-        const loaded = await loadAllCards((message) => setStatus(message));
-        if (!loaded.complete) setStatus(`Foram encontrados ${loaded.count} cartões, mas o botão Carregar mais ainda existe. Analisando o que foi carregado…`);
+        status('Carregando todos os flashcards…');
+        await loadAll((message) => status(message));
       }
-      setStatus('Lendo perguntas, respostas em laranja e explicações…');
-      const result = analyzeVisibleCards(deck);
-      renderResult(result);
+      status('Lendo perguntas, respostas em laranja e explicações…');
+      render(analyze(), input.value);
     } catch (error) {
-      setStatus(error?.message || String(error), 'error');
+      status(error?.message || String(error), 'error');
     } finally {
       running = false;
-      buttons?.forEach((button) => { button.disabled = false; });
+      panel.querySelectorAll('button').forEach((button) => { button.disabled = false; });
     }
   }
 
   async function copyTsv() {
-    if (!lastResult.tsv) {
-      setStatus('Analise os cartões antes de copiar.', 'error');
-      return;
-    }
-    let copied = false;
-    if (typeof GM_setClipboard === 'function') {
-      try {
-        const result = GM_setClipboard(lastResult.tsv, 'text');
-        if (result && typeof result.then === 'function') await result;
-        copied = true;
-      } catch (_error) { copied = false; }
-    }
-    if (!copied && pageWindow.navigator?.clipboard?.writeText) {
-      try { await pageWindow.navigator.clipboard.writeText(lastResult.tsv); copied = true; }
-      catch (_error) { copied = false; }
-    }
-    setStatus(copied ? 'TSV copiado.' : 'Não foi possível copiar automaticamente; use o conteúdo bruto.', copied ? 'ok' : 'error');
-  }
-
-  async function downloadWithGm() {
-    if (!lastResult.tsv || !lastResult.url) {
-      setStatus('Analise os cartões antes de baixar.', 'error');
-      return;
-    }
-    if (typeof GM_download !== 'function') {
-      setStatus('GM_download indisponível. Use o link Baixar TSV.', 'error');
-      return;
-    }
+    if (!prepared.tsv) return status('Prepare o TSV primeiro.', 'error');
     try {
-      const result = GM_download({ url: lastResult.url, name: lastResult.filename, saveAs: false });
-      if (result && typeof result.then === 'function') await result;
-      setStatus('Download solicitado pelo Violentmonkey.', 'ok');
-    } catch (_error) {
-      setStatus('O download pelo Violentmonkey falhou. Use o link Baixar TSV.', 'error');
-    }
+      if (typeof GM_setClipboard === 'function') await GM_setClipboard(prepared.tsv, 'text');
+      else await navigator.clipboard.writeText(prepared.tsv);
+      status('TSV copiado.', 'ok');
+    } catch (_error) { status('Não foi possível copiar. Use o conteúdo bruto.', 'error'); }
   }
 
-  function removeLegacyPanels() {
-    LEGACY_PANEL_IDS.forEach((id) => documentRef?.getElementById?.(id)?.remove?.());
-    Array.from(documentRef?.querySelectorAll?.('[id^="osler-anki-bridge-v04"],[id^="osler-anki-session-controls-v04"]') || []).forEach((node) => node.remove());
+  async function gmDownload() {
+    if (!prepared.tsv || !prepared.url) return status('Prepare o TSV primeiro.', 'error');
+    try {
+      await GM_download({ url: prepared.url, name: prepared.filename, saveAs: false });
+      status('Download solicitado.', 'ok');
+    } catch (_error) { status('O download automático falhou. Use o link Baixar TSV.', 'error'); }
   }
 
-  function inferDeckName() {
-    const roots = detectCardRoots(documentRef);
-    const first = roots[0];
-    const topic = first ? breadcrumbInfo(first).topic : '';
-    return topic || 'Osler';
+  function removeOldPanels() {
+    OLD_PANEL_IDS.forEach((id) => doc.getElementById(id)?.remove());
+    Array.from(doc.querySelectorAll('[id^="osler-anki-bridge-v04"],[id^="osler-anki-session-controls-v04"]')).forEach((node) => node.remove());
+  }
+
+  function inferName() {
+    const root = cardRoots()[0];
+    return root ? breadcrumb(root).topic || 'Osler' : 'Osler';
+  }
+
+  function removePanel() {
+    doc.getElementById(PANEL_ID)?.remove();
+    panel = null;
   }
 
   function installPanel() {
-    if (!documentRef?.body || documentRef.getElementById(PANEL_ID)) return;
-    removeLegacyPanels();
-    panel = documentRef.createElement('section');
+    if (!onConsultRoute() || !doc.body || doc.getElementById(PANEL_ID)) return;
+    removeOldPanels();
+    panel = doc.createElement('section');
     panel.id = PANEL_ID;
     panel.innerHTML = `
       <div style="display:flex;align-items:center;gap:6px">
         <strong style="flex:1">Osler → Anki · Ver todos ${VERSION}</strong>
-        <button type="button" data-action="toggle" title="Minimizar">−</button>
+        <button type="button" data-action="toggle">−</button>
       </div>
       <div data-role="body">
         <label style="display:block;margin-top:7px">Nome do baralho</label>
-        <input data-role="deck" type="text" style="width:100%;box-sizing:border-box;padding:6px" value="${escapeHtml(inferDeckName())}">
+        <input data-role="deck" type="text" value="${escapeHtml(inferName())}" style="width:100%;box-sizing:border-box;padding:6px">
         <div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:7px">
           <button type="button" data-action="all">Carregar tudo e preparar TSV</button>
-          <button type="button" data-action="visible">Analisar apenas os visíveis</button>
+          <button type="button" data-action="visible">Analisar visíveis</button>
         </div>
         <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:7px">
           <a data-role="download" href="#" hidden>Baixar TSV</a>
-          <button type="button" data-action="gm-download">Baixar via Violentmonkey</button>
+          <button type="button" data-action="gm">Baixar via Violentmonkey</button>
           <button type="button" data-action="copy">Copiar TSV</button>
         </div>
-        <div data-role="status" style="margin-top:7px;overflow-wrap:anywhere">Abra “Ver todos os flashcards”, escolha o nome do baralho e carregue tudo.</div>
-        <details style="margin-top:7px">
-          <summary>Diagnóstico</summary>
-          <textarea data-role="log" rows="7" style="width:100%;box-sizing:border-box"></textarea>
-        </details>
-        <details style="margin-top:5px">
-          <summary>Conteúdo TSV bruto</summary>
-          <textarea data-role="raw" rows="7" style="width:100%;box-sizing:border-box"></textarea>
-        </details>
-      </div>
-    `;
+        <div data-role="status" style="margin-top:7px;overflow-wrap:anywhere">Aguardando os cards da tela “Ver todos”.</div>
+        <details style="margin-top:7px"><summary>Diagnóstico</summary><textarea data-role="log" rows="7" style="width:100%;box-sizing:border-box"></textarea></details>
+        <details style="margin-top:5px"><summary>Conteúdo TSV bruto</summary><textarea data-role="raw" rows="7" style="width:100%;box-sizing:border-box"></textarea></details>
+      </div>`;
     panel.style.cssText = 'position:fixed;z-index:2147483647;top:12px;right:12px;width:min(460px,calc(100vw - 24px));max-height:88vh;overflow:auto;background:#17191d;color:#eee;border:1px solid #ff6d2d;border-radius:10px;padding:9px 10px;font:12px system-ui;box-sizing:border-box;box-shadow:0 5px 18px rgba(0,0,0,.45)';
-    documentRef.body.appendChild(panel);
+    doc.body.appendChild(panel);
     panel.querySelector('[data-action="toggle"]').addEventListener('click', (event) => {
       const body = panel.querySelector('[data-role="body"]');
       body.hidden = !body.hidden;
       event.currentTarget.textContent = body.hidden ? '+' : '−';
     });
-    panel.querySelector('[data-action="all"]').addEventListener('click', () => runAnalyze(true));
-    panel.querySelector('[data-action="visible"]').addEventListener('click', () => runAnalyze(false));
-    panel.querySelector('[data-action="gm-download"]').addEventListener('click', downloadWithGm);
+    panel.querySelector('[data-action="all"]').addEventListener('click', () => run(true));
+    panel.querySelector('[data-action="visible"]').addEventListener('click', () => run(false));
+    panel.querySelector('[data-action="gm"]').addEventListener('click', gmDownload);
     panel.querySelector('[data-action="copy"]').addEventListener('click', copyTsv);
   }
 
-  const api = {
-    VERSION,
-    analyzeVisibleCards,
-    buildTsv,
-    dedupeCards,
-    detectCardRoots,
-    isOrangeRgb,
-    parseCssColor,
-    parseCardRoot,
-    safeDeckName,
-    slugify,
-    stableHash,
-  };
+  function routeSync() {
+    const path = String(pageWindow.location?.pathname || '');
+    if (path !== lastPath) {
+      lastPath = path;
+      clearPreparedUrl();
+      if (!onConsultRoute()) removePanel();
+    }
+    if (onConsultRoute()) installPanel();
+  }
 
-  pageWindow.OslerAnkiConsultExporterV100 = api;
+  function hookHistory(method) {
+    const original = pageWindow.history?.[method];
+    if (typeof original !== 'function' || original.__oslerWrapped) return;
+    const wrapped = function wrappedHistory(...args) {
+      const result = original.apply(this, args);
+      pageWindow.setTimeout(routeSync, 0);
+      pageWindow.setTimeout(routeSync, 250);
+      return result;
+    };
+    wrapped.__oslerWrapped = true;
+    pageWindow.history[method] = wrapped;
+  }
+
+  const api = { VERSION, analyze, buildTsv, cardRoots, orangeColor, parseCard, stableHash };
+  pageWindow.OslerAnkiConsultExporterV101 = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else {
-    installPanel();
-    pageWindow.setTimeout?.(removeLegacyPanels, 500);
-    pageWindow.setTimeout?.(removeLegacyPanels, 1500);
+    hookHistory('pushState');
+    hookHistory('replaceState');
+    pageWindow.addEventListener('popstate', routeSync);
+    pageWindow.addEventListener('hashchange', routeSync);
+    doc.addEventListener('DOMContentLoaded', routeSync, { once: true });
+    pageWindow.setInterval(routeSync, 500);
+    routeSync();
   }
 }());
