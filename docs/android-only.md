@@ -1,38 +1,22 @@
-# Osler Anki Bridge — Fase 1 Android-only
+# Osler Anki Bridge — Fase 2 Android-only
 
-A Fase 1 é um userscript de captura e diagnóstico para uso em navegador Android com gerenciador de userscripts. Ela não envia dados para a internet, não chama Android Intent, não integra com AnkiDroid e não inclui aplicativo Android nativo.
+A versão 0.4.2 corrige cards em que pergunta, resposta e explicação aparecem em contêineres diferentes na página da Osler.
 
-## Fluxo da versão 0.3.3
+## Correção validada
 
-1. Abra uma sessão de flashcards na Osler com o userscript instalado.
-2. Toque em **Mostrar resposta**.
-3. Ao tocar em **Errei** ou **Difícil**, o script captura o card antes da troca de tela.
-4. **Acertei** não captura.
-5. Use **Copiar JSON** para revisar o resultado.
+O TSV de teste não continha o card:
 
-A captura dos botões usa `pointerdown` e `click`, com supressão da duplicata do mesmo gesto. A detecção aceita textos concatenados, como `Errei7 dias` ou `Difícil12 min`, porque a Osler pode montar o rótulo e o intervalo sem espaço no `textContent`.
+- `Angioedema. Em linhas gerais, qual a fisiopatologia?`
+- resposta: `Perda da integridade vascular.`
 
-Na página real da Osler não é necessário calibrar pergunta, assunto, resposta, explicação ou botões. A extração automática usa a estrutura estável do card, não as classes dinâmicas geradas pelo layout.
+A 0.4.2 procura a pergunta em um contêiner ancestral comum, extrai os blocos que ficam entre pergunta e explicação e mantém um snapshot recente do card revelado antes da troca de tela.
 
-## Estrutura capturada
+## Fluxo
 
-- `topic` e `deck`: primeiro `<strong>` da pergunta, sem pontuação final.
-- `question.text` e `question.html`: pergunta com cada `.cloze-answer` substituído por `[...]`.
-- `question.revealedText` e `question.revealedHtml`: versão revelada.
-- `answer`: usa os elementos `.cloze-answer` quando existem.
-- Em cards sem cloze, `answer` é obtido do bloco exibido entre a pergunta e `div.osler-card-explanation`, incluindo itens de lista.
-- `explanation`: todo o bloco `div.osler-card-explanation`, incluindo todos os parágrafos.
+1. Errei e Difícil adicionam o card à fila persistente.
+2. Acertei não adiciona.
+3. O painel mostra a quantidade na fila.
+4. Se o contador não aumentar em um caso isolado, use **Adicionar card atual** antes de avançar; esse botão é um fallback de segurança.
+5. Baixe o TSV no fim da sessão.
 
-O campo `answer.source` informa se a origem foi `cloze`, `intermediate-block` ou `manual-fallback`.
-
-## Privacidade do JSON
-
-O sanitizador remove scripts, atributos perigosos e parâmetros sensíveis de URLs, incluindo `token`, `access_token`, `authorization`, `signature`, `sig`, `key` e `jwt`. A URL relativa da imagem permanece no HTML, mas o token temporário não deve aparecer no JSON copiado.
-
-## Fallback e limitações
-
-- A calibração manual permanece em um painel recolhível apenas para diagnóstico de páginas não reconhecidas.
-- **Limpar calibração** remove a configuração manual salva na chave v2.
-- Capturas duplicadas são ignoradas por identificador estável.
-- Nenhum dado é transmitido pela internet.
-- A Fase 2 e a integração com AnkiDroid permanecem fora do escopo.
+A fila continua em `oslerAnkiBridge.queue.v1` e sobrevive a F5 e ao encerramento da sessão da Osler.

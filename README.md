@@ -1,34 +1,57 @@
-# Osler Anki Bridge
+# Osler Anki Exporter
 
-Fase 1 Android-only para capturar e diagnosticar cards da Osler por meio de userscript, sem envio de dados e sem integração com AnkiDroid ou aplicativo Android.
+Userscript Android-first para exportar em lote os flashcards do modo **Consulta** da Osler para o AnkiDroid.
 
-## Versão 0.3.4
+## Versão 1.2.0 — Consulta
 
-A extração na página real da Osler é automática:
+O fluxo antigo de captura durante a revisão foi abandonado. A versão atual não intercepta **Errei**, **Difícil**, teclado, avanço de card ou sessões persistentes.
 
-- localiza a pergunta a partir de `div.osler-card-explanation`;
-- extrai o assunto do primeiro `<strong>` da pergunta;
-- substitui respostas reveladas `.cloze-answer` por `[...]` na versão da pergunta;
-- preserva também a pergunta revelada;
-- captura um ou vários clozes como resposta;
-- em cards sem cloze, captura o bloco de resposta existente entre a pergunta e a explicação, incluindo listas;
-- captura todos os parágrafos da explicação;
-- detecta **Errei** e **Difícil** pelo rótulo e, como fallback, pela posição real dos botões SRS dentro do `ButtonsContainer` da Osler;
-- escuta `touchstart`, `pointerdown` e `click` para capturar antes da troca do card;
-- ignora **Acertei**;
-- remove `token`, `access_token`, assinatura e parâmetros equivalentes das URLs presentes no HTML copiado.
+A 1.2.0:
 
-A calibração manual permanece disponível somente como fallback de diagnóstico.
+- é carregada antes da navegação interna e aparece automaticamente ao entrar na **Consulta**;
+- reconhece os blocos tanto pela moldura laranja quanto pelo botão de opções de cada card;
+- aciona **Carregar mais** até encerrar a paginação;
+- lê o indicador `Mostrando X de Y` da própria Osler;
+- transforma cada lacuna laranja em um card individual do Anki;
+- lê também respostas laranjas separadas e cards comuns de pergunta e resposta;
+- preserva contexto, explicação e assunto original;
+- remove referências bibliográficas finais de forma conservadora;
+- deduplica pelo conteúdo;
+- exporta tudo para um único baralho escolhido pelo usuário;
+- bloqueia o download quando a quantidade de cards gerados não coincide com a quantidade exibida pela Osler.
 
-## Conteúdo do repositório
+A Consulta pode agrupar vários flashcards originais dentro de um único bloco visual. Por isso, a validação usa o número de **cards gerados**, e não exige um bloco DOM para cada flashcard.
 
-- `userscript/osler-anki-bridge.user.js`: código-fonte do userscript.
-- `docs/osler-anki-bridge.user.js`: cópia publicada pelo GitHub Pages.
-- `docs/index.html`: página simulada da estrutura real da Osler.
-- `tests/osler-anki-bridge.test.js`: testes automatizados da extração.
-- `docs/android-only.md`: instruções e limites da Fase 1.
+## Instalação
 
-O GitHub Pages deve ser configurado para publicar diretamente da branch `main`, pasta `/docs`.
+Instale apenas `docs/osler-anki-consult.user.js` e mantenha ativo somente **Osler Anki Exporter — Consulta 1.2.0**.
+
+Desative os scripts antigos:
+
+- `Osler Anki Bridge`;
+- `Osler Anki Bridge — Sessões`;
+- `Osler Capture Diagnostics`;
+- `Osler Anki Bridge — Correção de perguntas`.
+
+## Fluxo
+
+1. Abra normalmente a tela **Flashcards** da Osler.
+2. Selecione o tema, escolha o modo **Consulta** e inicie pelos botões da própria Osler.
+3. Não recarregue a rota `/consult`; a Osler depende do estado criado pela navegação interna.
+4. No painel **Osler → Anki · Consulta**, informe o nome do baralho.
+5. Toque em **Carregar tudo e gerar TSV**.
+6. O download só será liberado quando o total gerado coincidir com `Mostrando X de Y`.
+7. Baixe o TSV e importe-o no AnkiDroid.
+
+## Validação
+
+A extração foi validada em Chromium headless nos seguintes cenários:
+
+- 41 contêineres visuais, produzindo 41 cards;
+- um bloco agrupado com três lacunas, produzindo três cards, mais um bloco pergunta-resposta, totalizando quatro cards a partir de dois blocos;
+- bloqueio de exportação quando o total gerado é inferior ao indicador da Osler.
+
+A suíte completa e a verificação de sintaxe passam no GitHub Actions.
 
 ## Desenvolvimento
 
@@ -36,7 +59,3 @@ O GitHub Pages deve ser configurado para publicar diretamente da branch `main`, 
 npm test
 npm run lint
 ```
-
-## Fora do escopo
-
-Este repositório ainda não implementa Fase 2, Android Intent, envio direto ao AnkiDroid, backend, sincronização em nuvem nem aplicativo Android nativo.
