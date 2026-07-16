@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Osler Anki Exporter — Consulta
 // @namespace    https://github.com/osler-anki-bridge/osler-anki-bridge
-// @version      1.1.0
-// @description  Exporta os flashcards do modo Consulta para um único baralho do Anki.
+// @version      1.2.0
+// @description  Exporta todos os flashcards do modo Consulta para um baralho do Anki.
 // @match        https://oslermedicina.com.br/*
 // @match        https://*.oslermedicina.com.br/*
 // @grant        GM_download
@@ -12,352 +12,54 @@
 // @updateURL    https://raw.githubusercontent.com/leonardolealluz183-bit/osler-anki-bridge/phase-2-android-bridge/docs/osler-anki-consult.user.js
 // @downloadURL  https://raw.githubusercontent.com/leonardolealluz183-bit/osler-anki-bridge/phase-2-android-bridge/docs/osler-anki-consult.user.js
 // ==/UserScript==
-
-(function () {
-  'use strict';
-
-  const VERSION = '1.1.0';
-  const PANEL_ID = 'osler-anki-consulta-v110';
-  const W = typeof unsafeWindow !== 'undefined' ? unsafeWindow : (typeof window !== 'undefined' ? window : globalThis);
-  const D = W.document || null;
-  const N = W.Node || globalThis.Node || { DOCUMENT_POSITION_FOLLOWING: 4 };
-  let panel = null;
-  let busy = false;
-  let prepared = null;
-  let syncTimer = null;
-
-  const text = (v) => String(v || '').replace(/\s+/g, ' ').trim();
-  const fold = (v) => text(v).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-  const esc = (v) => String(v || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-  const sleep = (ms) => new Promise((resolve) => W.setTimeout(resolve, ms));
-
-  function hash(value) {
-    let h = 2166136261;
-    for (const c of String(value || '')) { h ^= c.charCodeAt(0); h = Math.imul(h, 16777619); }
-    return (h >>> 0).toString(36);
-  }
-
-  function slug(value) {
-    return fold(value).replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 72) || 'osler';
-  }
-
-  function deckName(value) {
-    return text(value).replace(/::+/g, ' — ').replace(/[\t\r\n]+/g, ' ').slice(0, 120) || 'Osler';
-  }
-
-  function clozeSpecs(topic, prompt, answerTexts) {
-    return answerTexts.map((answer, index) => ({ id: hash([topic, prompt, index, answer].join('\n---\n')), answer, index }));
-  }
-
-  function consultPath(path = W.location?.pathname || '') {
-    return /(?:^|\/)(?:consult|consulta)(?:\/|$)/i.test(String(path));
-  }
-
-  function style(el) {
-    try { return W.getComputedStyle(el); } catch (_) { return null; }
-  }
-
-  function visible(el) {
-    if (!el || el.hidden || el.closest?.('[hidden],[aria-hidden="true"],[inert]')) return false;
-    const s = style(el);
-    if (s && (s.display === 'none' || s.visibility === 'hidden' || Number(s.opacity) === 0)) return false;
-    const r = el.getBoundingClientRect?.();
-    return !r || (r.width > 0 && r.height > 0);
-  }
-
-  function rgb(value) {
-    const m = String(value || '').match(/rgba?\(\s*(\d+(?:\.\d+)?)\D+(\d+(?:\.\d+)?)\D+(\d+(?:\.\d+)?)/i);
-    if (m) return m.slice(1, 4).map(Number);
-    const h = String(value || '').match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
-    if (!h) return null;
-    const raw = h[1].length === 3 ? h[1].split('').map((x) => x + x).join('') : h[1];
-    return [0, 2, 4].map((i) => parseInt(raw.slice(i, i + 2), 16));
-  }
-
-  function orange(value) {
-    const c = Array.isArray(value) ? value : rgb(value);
-    if (!c) return false;
-    const [r, g, b] = c;
-    return r >= 165 && g >= 30 && g <= 190 && b <= 140 && r >= g + 35 && r >= b + 55;
-  }
-
-  function orangeBorder(el) {
-    const s = style(el);
-    return !!s && ['Top', 'Right', 'Bottom', 'Left'].some((side) => parseFloat(s[`border${side}Width`] || 0) >= 1 && orange(s[`border${side}Color`]));
-  }
-
-  function answerNode(el) {
-    if (!visible(el) || !text(el.textContent) || text(el.textContent).length > 500) return false;
-    const hint = [el.className, el.id, el.getAttribute?.('data-answer'), el.getAttribute?.('data-testid')].join(' ');
-    const s = style(el);
-    return /cloze|answer|resposta|highlight|correct/i.test(hint) || orange(s?.color) || orange(s?.backgroundColor);
-  }
-
-  function deepest(nodes) {
-    const all = [...new Set(nodes.filter(Boolean))];
-    return all.filter((a) => !all.some((b) => a !== b && a.contains?.(b)));
-  }
-
-  function answers(root) {
-    return deepest([...root.querySelectorAll('span,strong,b,mark,em,i,u,small,code,[class*="cloze" i],[class*="answer" i],[data-answer]')].filter(answerNode));
-  }
-
-  function cardRoots() {
-    if (!D?.body) return [];
-    const all = [...D.querySelectorAll('article,section,div,li')].filter((el) => {
-      if (el.id === PANEL_ID || el.closest?.(`#${PANEL_ID}`) || !visible(el) || !orangeBorder(el)) return false;
-      const r = el.getBoundingClientRect?.();
-      const t = text(el.textContent);
-      return (!r || (r.width >= 220 && r.height >= 70)) && t.length >= 18 && t.length <= 25000 && !!el.querySelector('p,ul,ol,table,blockquote,figure,img,strong,b');
-    });
-    return all.filter((a) => !all.some((b) => a !== b && a.contains(b) && orangeBorder(b))).sort((a, b) => a.compareDocumentPosition?.(b) & N.DOCUMENT_POSITION_FOLLOWING ? -1 : 1);
-  }
-
-  function breadcrumb(root) {
-    const rr = root.getBoundingClientRect?.();
-    const nodes = [...root.querySelectorAll('nav,ol,div,p')].filter((el) => {
-      const links = [...el.querySelectorAll('a,[role="link"]')].filter(visible);
-      const r = el.getBoundingClientRect?.();
-      return visible(el) && links.length >= 2 && links.length <= 8 && text(el.textContent).length < 320 && (!rr || !r || r.top < rr.top + rr.height * 0.42);
-    });
-    const node = nodes[0] || null;
-    const parts = node ? [...node.querySelectorAll('a,[role="link"],span')].map((x) => text(x.textContent)).filter((x) => x && x.length < 120) : [];
-    return { node, topic: parts.at(-1) || '' };
-  }
-
-  function blocks(root) {
-    const nodes = [...root.querySelectorAll('p,ul,ol,table,blockquote,figure,h1,h2,h3,h4,h5,h6')].filter((el) => visible(el) && text(el.textContent || el.getAttribute?.('alt')));
-    return nodes.filter((a) => !nodes.some((b) => a !== b && b.contains(a)));
-  }
-
-  function citations(list) {
-    return list.filter((el, i) => {
-      const t = fold(el.textContent);
-      const explicit = /fonte|referencia|doi|uptodate|guideline|diretriz|manual|tratado|ministerio da saude|sociedade brasileira|politicas? de saude|organizacao e operacionalizacao/.test(t);
-      const italic = style(el)?.fontStyle === 'italic' || /^(EM|I)$/.test(el.tagName || '');
-      return explicit || (italic && i >= list.length - 2 && /\b(em|capitulo|edicao|volume|vol\.|pag\.)\b/.test(t));
-    });
-  }
-
-  function pathFrom(root, node) {
-    const p = [];
-    let cur = node;
-    while (cur && cur !== root) { const par = cur.parentNode; if (!par) return null; p.unshift([...par.childNodes].indexOf(cur)); cur = par; }
-    return cur === root ? p : null;
-  }
-
-  function atPath(root, path) {
-    let cur = root;
-    for (const i of path || []) { cur = cur?.childNodes?.[i]; if (!cur) return null; }
-    return cur;
-  }
-
-  function cloneClean(node) {
-    const c = node?.cloneNode?.(true);
-    if (!c) return null;
-    c.querySelectorAll?.('script,style,button,svg,[role="button"],[aria-label*="menu" i]').forEach((x) => x.remove());
-    c.querySelectorAll?.('[id]').forEach((x) => x.removeAttribute('id'));
-    c.querySelectorAll?.('*').forEach((x) => [...x.attributes].forEach((a) => { if (/^on/i.test(a.name) || a.name === 'srcdoc') x.removeAttribute(a.name); }));
-    return c;
-  }
-
-  function html(node) {
-    return /^(P|LI|BLOCKQUOTE|TABLE|UL|OL|FIGURE|H[1-6])$/.test(node?.tagName || '') ? node.outerHTML : node?.innerHTML || '';
-  }
-
-  function structure(root) {
-    const bc = breadcrumb(root);
-    const all = blocks(root);
-    const refs = citations(all);
-    const usable = all.filter((el) => !(bc.node && (el === bc.node || el.contains(bc.node) || bc.node.contains(el))) && !refs.some((r) => el === r || el.contains(r) || r.contains(el)));
-    const ans = answers(root).filter((a) => !bc.node?.contains(a) && !refs.some((r) => r.contains(a)));
-    return { bc, usable, ans };
-  }
-
-  function promptFor(root, ans, usable) {
-    let cur = ans;
-    while (cur && cur !== root) { if (usable.includes(cur) || /^(P|LI|BLOCKQUOTE|TD|TH|H[1-6])$/.test(cur.tagName || '')) return cur; cur = cur.parentElement; }
-    return usable.find((x) => x.contains(ans)) || null;
-  }
-
-  function clozeCards(root, s, sourceIndex) {
-    const topic = s.bc.topic || text(root.querySelector('strong,b')?.textContent).replace(/[\s.:;,!?–—-]+$/u, '') || 'Osler';
-    const groups = new Map();
-    const errors = [];
-    s.ans.forEach((a) => { const p = promptFor(root, a, s.usable); if (!p) errors.push(`Bloco ${sourceIndex + 1}: lacuna sem pergunta.`); else { if (!groups.has(p)) groups.set(p, []); groups.get(p).push(a); } });
-    const cards = [];
-    groups.forEach((list, prompt) => {
-      const specs = clozeSpecs(topic, text(prompt.textContent), list.map((a) => text(a.textContent)));
-      list.forEach((a, idx) => {
-      const c = cloneClean(prompt);
-      const target = atPath(c, pathFrom(prompt, a));
-      if (!target) { errors.push(`Bloco ${sourceIndex + 1}: falha ao localizar uma lacuna.`); return; }
-      target.replaceWith(D.createTextNode('[...]'));
-      const answer = text(a.textContent);
-      const front = text(c.textContent);
-      if (!front || !answer) return;
-      const later = s.usable.filter((b) => b !== prompt && !(b.contains(prompt) || prompt.contains(b)) && (prompt.compareDocumentPosition(b) & N.DOCUMENT_POSITION_FOLLOWING));
-      cards.push({
-        id: specs[idx].id,
-        type: 'cloze', topic, frontText: front, frontHtml: html(c), backText: answer, backHtml: esc(answer),
-        contextHtml: html(cloneClean(prompt)), explanationHtml: later.map((b) => html(cloneClean(b))).join('\n'),
-      });
-      });
-    });
-    return { cards, errors };
-  }
-
-  function qaCards(root, s, sourceIndex) {
-    const b = s.usable;
-    let answerIndex = -1;
-    for (let i = 1; i < b.length; i++) {
-      const prev = text(b[i - 1].textContent);
-      const cur = text(b[i].textContent);
-      const bold = text([...b[i].querySelectorAll('strong,b')].map((x) => x.textContent).join(' '));
-      if (/\?$/.test(prev) || /^(sim|não|nao|verdadeiro|falso|correto|incorreto)\b/i.test(cur) || (cur.length <= 500 && bold.length / Math.max(1, cur.length) >= 0.55)) { answerIndex = i; break; }
-    }
-    if (answerIndex < 1) return { cards: [], errors: [`Bloco ${sourceIndex + 1}: pergunta e resposta não separadas.`] };
-    const q = b.slice(0, answerIndex);
-    const a = b[answerIndex];
-    const frontText = text(q.map((x) => x.textContent).join(' '));
-    const backText = text(a.textContent);
-    const topic = s.bc.topic || text(q[0]?.querySelector('strong,b')?.textContent).replace(/[\s.:;,!?–—-]+$/u, '') || 'Osler';
-    return { cards: [{ id: hash([topic, frontText, backText].join('\n---\n')), type: 'qa', topic, frontText, frontHtml: q.map((x) => html(cloneClean(x))).join('\n'), backText, backHtml: html(cloneClean(a)), contextHtml: '', explanationHtml: b.slice(answerIndex + 1).map((x) => html(cloneClean(x))).join('\n') }], errors: [] };
-  }
-
-  function analyze() {
-    const roots = cardRoots();
-    const map = new Map();
-    const errors = [];
-    let clozeSources = 0;
-    let qaSources = 0;
-    roots.forEach((root, i) => {
-      const s = structure(root);
-      const result = s.ans.length ? (clozeSources++, clozeCards(root, s, i)) : (qaSources++, qaCards(root, s, i));
-      result.cards.forEach((c) => { if (!map.has(c.id)) map.set(c.id, c); });
-      errors.push(...result.errors);
-    });
-    return { roots: roots.length, clozeSources, qaSources, cards: [...map.values()], errors };
-  }
-
-  function field(value) {
-    return `"${String(value || '').replace(/\r?\n/g, '<br>').replace(/\t/g, ' ').replace(/"/g, '""')}"`;
-  }
-
-  function buildTsv(cards, name) {
-    const deck = deckName(name);
-    const headers = ['#separator:Tab', '#html:true', '#tags:osler', '#columns:Frente\tVerso\tTags\tBaralho', '#tags column:3', '#deck column:4'];
-    const rows = cards.map((c) => {
-      const front = `<span style="display:none">osler:${esc(c.id)}</span>${c.frontHtml || esc(c.frontText)}`;
-      const context = c.contextHtml ? `<hr><strong>Contexto completo</strong><br>${c.contextHtml}` : '';
-      const explanation = c.explanationHtml ? `<hr><strong>Explicação</strong><br>${c.explanationHtml}` : '';
-      const back = `<strong>Resposta</strong><br>${c.backHtml || esc(c.backText)}${context}${explanation}<hr><small>Assunto: ${esc(c.topic)} · ID: ${esc(c.id)}</small>`;
-      return [front, back, `osler osler_consulta_${slug(deck)} assunto_${slug(c.topic)} tipo_${c.type}`, deck].map(field).join('\t');
-    });
-    return `\uFEFF${[...headers, ...rows].join('\n')}\n`;
-  }
-
-  function loadMore() {
-    return [...D.querySelectorAll('button,[role="button"],a')].find((el) => visible(el) && fold([el.textContent, el.getAttribute?.('aria-label'), el.title].join(' ')).includes('carregar mais')) || null;
-  }
-
-  async function loadAll() {
-    let previous = cardRoots().length;
-    let stalled = 0;
-    for (let clicks = 0; clicks < 180; clicks++) {
-      const button = loadMore();
-      if (!button) return;
-      button.scrollIntoView?.({ block: 'center' });
-      button.click();
-      const start = Date.now();
-      let current = previous;
-      while (Date.now() - start < 9000) { await sleep(220); current = cardRoots().length; if (current > previous || !loadMore()) break; }
-      status(`Consulta: ${current} blocos carregados.`);
-      stalled = current <= previous ? stalled + 1 : 0;
-      previous = current;
-      if (stalled >= 2) return;
-    }
-  }
-
-  function status(message, error = false) {
-    const el = panel?.querySelector('[data-role="status"]');
-    if (el) { el.textContent = message; el.style.color = error ? '#ff8a80' : '#eee'; }
-  }
-
-  function render(result, name) {
-    if (prepared?.url) W.URL.revokeObjectURL(prepared.url);
-    const tsv = buildTsv(result.cards, name);
-    const filename = `osler-${slug(name).replace(/_/g, '-')}-${result.cards.length}-cards.tsv`;
-    const url = W.URL.createObjectURL(new W.Blob([tsv], { type: 'text/tab-separated-values;charset=utf-8' }));
-    prepared = { tsv, filename, url };
-    const link = panel.querySelector('[data-role="download"]');
-    link.href = url; link.download = filename; link.hidden = !result.cards.length; link.textContent = `Baixar TSV (${result.cards.length})`;
-    panel.querySelector('[data-role="raw"]').value = tsv;
-    panel.querySelector('[data-role="log"]').value = [`Versão: ${VERSION}`, `Tela: Consulta`, `Blocos da Consulta: ${result.roots}`, `Blocos com lacunas: ${result.clozeSources}`, `Blocos pergunta-resposta: ${result.qaSources}`, `Cards únicos gerados: ${result.cards.length}`, `Erros: ${result.errors.length}`, ...result.errors].join('\n');
-    status(`${result.cards.length} cards gerados a partir de ${result.roots} blocos da Consulta.${result.errors.length ? ` ${result.errors.length} erros no diagnóstico.` : ''}`, !result.cards.length);
-  }
-
-  async function run(loadEverything) {
-    if (busy) return;
-    const input = panel.querySelector('[data-role="deck"]');
-    if (!input.value.trim()) return status('Digite o nome do baralho.', true);
-    busy = true;
-    panel.querySelectorAll('button').forEach((b) => { b.disabled = true; });
-    try { if (loadEverything) { status('Carregando toda a Consulta…'); await loadAll(); } status('Lendo e separando as lacunas…'); render(analyze(), input.value); }
-    catch (e) { status(e?.message || String(e), true); }
-    finally { busy = false; panel.querySelectorAll('button').forEach((b) => { b.disabled = false; }); }
-  }
-
-  function inferName() {
-    const root = cardRoots()[0];
-    return root ? structure(root).bc.topic || text(root.querySelector('strong,b')?.textContent).replace(/[\s.:;,!?–—-]+$/u, '') || 'Osler' : 'Osler';
-  }
-
-  function install() {
-    if (!D?.body || D.getElementById(PANEL_ID) || !(consultPath() || cardRoots().length || fold(D.body.innerText).includes('flashcards com varias lacunas'))) return;
-    ['osler-anki-consult-exporter-v100', 'osler-anki-consult-exporter-v101', 'osler-anki-bridge-v0410', 'osler-anki-session-controls-v0411', 'osler-anki-session-controls-v0412', 'osler-anki-question-fix-v0412'].forEach((id) => D.getElementById(id)?.remove());
-    panel = D.createElement('section');
-    panel.id = PANEL_ID;
-    panel.innerHTML = `<div><strong>Osler → Anki · Consulta ${VERSION}</strong> <button data-action="toggle">−</button></div><div data-role="body"><label>Nome do baralho</label><input data-role="deck" value="${esc(inferName())}"><div><button data-action="all">Carregar tudo e gerar TSV</button><button data-action="visible">Analisar carregados</button></div><div><a data-role="download" hidden>Baixar TSV</a> <button data-action="gm">Baixar via Violentmonkey</button> <button data-action="copy">Copiar TSV</button></div><div data-role="status">Consulta detectada.</div><details><summary>Diagnóstico</summary><textarea data-role="log" rows="8"></textarea></details><details><summary>TSV bruto</summary><textarea data-role="raw" rows="8"></textarea></details></div>`;
-    panel.style.cssText = 'position:fixed;z-index:2147483647;top:8px;right:8px;width:min(430px,calc(100vw - 16px));max-height:82vh;overflow:auto;background:#17191d;color:#eee;border:1px solid #ff6d2d;border-radius:10px;padding:9px;font:12px system-ui;box-sizing:border-box';
-    panel.querySelectorAll('input,textarea').forEach((el) => { el.style.width = '100%'; el.style.boxSizing = 'border-box'; });
-    D.body.appendChild(panel);
-    panel.querySelector('[data-action="toggle"]').onclick = (e) => { const body = panel.querySelector('[data-role="body"]'); body.hidden = !body.hidden; e.currentTarget.textContent = body.hidden ? '+' : '−'; };
-    panel.querySelector('[data-action="all"]').onclick = () => run(true);
-    panel.querySelector('[data-action="visible"]').onclick = () => run(false);
-    panel.querySelector('[data-action="copy"]').onclick = async () => { if (!prepared) return status('Gere o TSV primeiro.', true); try { await GM_setClipboard(prepared.tsv, 'text'); status('TSV copiado.'); } catch (_) { status('Falha ao copiar; use o TSV bruto.', true); } };
-    panel.querySelector('[data-action="gm"]').onclick = async () => { if (!prepared) return status('Gere o TSV primeiro.', true); try { await GM_download({ url: prepared.url, name: prepared.filename, saveAs: false }); } catch (_) { status('Use o link Baixar TSV.', true); } };
-  }
-
-  function sync() {
-    syncTimer = null;
-    if (!D?.body) return;
-    if (consultPath() || cardRoots().length || fold(D.body.innerText).includes('flashcards com varias lacunas')) install();
-    else if (panel) { panel.remove(); panel = null; }
-  }
-
-  function schedule(ms = 50) {
-    if (syncTimer) W.clearTimeout(syncTimer);
-    syncTimer = W.setTimeout(sync, ms);
-  }
-
-  function hook(name) {
-    const original = W.history?.[name];
-    if (typeof original !== 'function' || original.__oslerConsulta) return;
-    W.history[name] = function (...args) { const result = original.apply(this, args); schedule(0); schedule(500); return result; };
-    W.history[name].__oslerConsulta = true;
-  }
-
-  const api = { VERSION, buildTsv, cardRoots, clozeSpecs, consultPath, orange, rgb, hash, deckName };
-  W.OslerAnkiConsultaV110 = api;
-  if (typeof module !== 'undefined' && module.exports) module.exports = api;
-  else {
-    hook('pushState'); hook('replaceState');
-    W.addEventListener('popstate', () => schedule(0));
-    D.addEventListener('DOMContentLoaded', () => schedule(0), { once: true });
-    const observe = () => { if (D.documentElement) new W.MutationObserver(() => schedule(150)).observe(D.documentElement, { childList: true, subtree: true }); };
-    if (D.documentElement) observe(); else D.addEventListener('DOMContentLoaded', observe, { once: true });
-    W.setInterval(sync, 800);
-    schedule(0);
-  }
-}());
+(function(){
+'use strict';
+const V='1.2.0',ID='osler-anki-consulta-v120',W=typeof unsafeWindow!='undefined'?unsafeWindow:window,D=W.document,N=W.Node;
+let P=null,B=false,E=null,T=null,edited=false;
+const tx=x=>String(x||'').replace(/\s+/g,' ').trim(),fd=x=>tx(x).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(),sl=x=>fd(x).replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'').slice(0,72)||'osler',esc=x=>String(x||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'),wait=n=>new Promise(r=>W.setTimeout(r,n));
+function hs(x){let h=2166136261;for(const c of String(x||'')){h^=c.charCodeAt(0);h=Math.imul(h,16777619)}return(h>>>0).toString(36)}
+function dn(x){return tx(x).replace(/::+/g,' — ').replace(/[\t\r\n]+/g,' ').slice(0,120)||'Osler'}
+function css(e,p=null){try{return W.getComputedStyle(e,p)}catch{return null}}
+function vis(e){if(!e||e.hidden||e.closest?.('[hidden],[aria-hidden="true"],[inert]'))return false;const s=css(e),r=e.getBoundingClientRect?.();return!(s&&(s.display==='none'||s.visibility==='hidden'||+s.opacity===0))&&(!r||(r.width>0&&r.height>0))}
+function rgb(x){let m=String(x||'').match(/rgba?\(\s*(\d+(?:\.\d+)?)\D+(\d+(?:\.\d+)?)\D+(\d+(?:\.\d+)?)/i);if(m)return m.slice(1,4).map(Number);m=String(x||'').match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);if(!m)return null;let v=m[1].length===3?m[1].split('').map(x=>x+x).join(''):m[1];return[0,2,4].map(i=>parseInt(v.slice(i,i+2),16))}
+function orange(x){const c=Array.isArray(x)?x:rgb(x);if(!c)return false;const[r,g,b]=c;return r>=155&&g>=25&&g<=195&&b<=150&&r>=g+28&&r>=b+45}
+function frame(e){return[css(e),css(e,'::before'),css(e,'::after')].filter(Boolean).some(s=>['Top','Right','Bottom','Left'].some(k=>parseFloat(s['border'+k+'Width']||0)>=.75&&orange(s['border'+k+'Color']))||(parseFloat(s.outlineWidth||0)>=.75&&orange(s.outlineColor)))}
+function ans(e){if(!vis(e)){return false}const t=tx(e.textContent);if(!t||t.length>600)return false;const q=[e.className,e.id,e.getAttribute?.('data-answer'),e.getAttribute?.('data-testid'),e.getAttribute?.('aria-label')].join(' '),s=css(e);return/cloze|answer|resposta|highlight|correct|blank/i.test(q)||orange(s?.color)||orange(s?.backgroundColor)}
+function menus(s=D){return[...s.querySelectorAll('button,[role="button"],[aria-haspopup="menu"]')].filter(e=>{if(!vis(e)||e.closest?.('#'+ID))return false;const r=e.getBoundingClientRect?.(),q=fd([e.textContent,e.getAttribute?.('aria-label'),e.title,e.className].join(' ')),g=tx(e.textContent),n=e.querySelectorAll?.('svg circle').length||0;return(!r||r.width<=70&&r.height<=70)&&(/menu|opcoes|mais|more|overflow|ellipsis/.test(q)||/^[⋮︙⠇⋯…]$/.test(g)||n>=3)})}
+function score(e){if(!e||e===D.body||!vis(e)||e.id===ID||e.closest?.('#'+ID)||!/^(ARTICLE|SECTION|DIV|LI|MAIN)$/.test(e.tagName||''))return-Infinity;const r=e.getBoundingClientRect?.(),t=tx(e.textContent);if((r&&(r.width<220||r.height<70))||t.length<18||t.length>50000)return-Infinity;const m=menus(e),kids=[...e.children].filter(frame).length;let z=frame(e)?130:0;z+=m.length===1?85:m.length>1?-90*(m.length-1):0;z+=e.querySelector('p,ul,ol,table,blockquote,figure,img,strong,b')?25:0;z-=kids>1?120:0;return z}
+function near(c){let e=c.parentElement,b=null,z=-1e9;for(let i=0;e&&e!==D.body&&i<14;i++,e=e.parentElement){const s=score(e);if(s>z){z=s;b=e}}return z>=100?b:null}
+function count(){const m=tx(D.body?.innerText).match(/mostrando\s+(\d+)\s+de\s+(\d+)/i);return m?{shown:+m[1],total:+m[2]}:{shown:null,total:null}}
+function roots(){if(!D.body)return[];const S=new Set;menus().forEach(x=>{const r=near(x);if(r)S.add(r)});[...D.querySelectorAll('article,section,div,li')].forEach(x=>{if(frame(x)&&score(x)>=130)S.add(x)});const a=[...S].filter(x=>score(x)>=100),b=a.filter(x=>!a.some(y=>x!==y&&x.contains(y)&&score(y)>=score(x)-20));return b.sort((x,y)=>x.compareDocumentPosition(y)&N.DOCUMENT_POSITION_FOLLOWING?-1:1)}
+function clone(e){const c=e?.cloneNode(true);if(!c)return null;c.querySelectorAll('script,style,button,svg,[role="button"],[aria-haspopup="menu"]').forEach(x=>x.remove());c.querySelectorAll('[id]').forEach(x=>x.removeAttribute('id'));return c}
+function html(e){return e?/^(P|LI|BLOCKQUOTE|TABLE|UL|OL|FIGURE|H[1-6]|DIV)$/.test(e.tagName||'')?e.outerHTML:e.innerHTML||'':''}
+function blocks(r){const a=[...r.querySelectorAll('p,li,blockquote,table,figure,h1,h2,h3,h4,h5,h6,td,th,div')].filter(e=>{if(!vis(e)||e.closest?.('#'+ID))return false;const t=tx(e.textContent);if(!t||t.length>6000)return false;const c=[...e.children].filter(x=>/^(P|LI|BLOCKQUOTE|TABLE|FIGURE|H[1-6]|TD|TH|DIV)$/.test(x.tagName||'')&&tx(x.textContent));return c.length===0||(/^(P|LI|TD|TH|H[1-6])$/.test(e.tagName||'')&&c.length<=2)});return[...new Set(a)].filter(x=>!a.some(y=>x!==y&&y.contains(x)&&tx(y.textContent)===tx(x.textContent)))}
+function refs(a,r){return new Set(a.filter((e,i)=>{const t=fd(e.textContent),s=css(e),R=r.getBoundingClientRect?.(),q=e.getBoundingClientRect?.();return/fonte|referencia|doi|uptodate|guideline|diretriz|manual|tratado|ministerio da saude|sociedade brasileira|politicas? de saude|organizacao e operacionalizacao|capitulo|edicao|volume|vol\.|pag\./.test(t)||((s?.fontStyle==='italic'||e.closest?.('em,i'))&&(q&&R?q.top>=R.top+R.height*.55:i>=a.length-2))}))}
+function deepest(a){a=[...new Set(a)];return a.filter(x=>!a.some(y=>x!==y&&x.contains(y)))}
+function topic(r,a){const n=[...r.querySelectorAll('nav,ol,[aria-label*="breadcrumb" i]')].find(vis);if(n){const p=[...n.querySelectorAll('a,[role="link"],span')].map(x=>tx(x.textContent)).filter(x=>x&&x.length<120);if(p.length)return p.at(-1)}const s=a.map(x=>x.querySelector?.('strong,b')).find(x=>x&&tx(x.textContent).length<160);return tx(s?.textContent).replace(/[\s.:;,!?–—-]+$/u,'')||'Osler'}
+function answers(r,R){return deepest([...r.querySelectorAll('span,strong,b,mark,em,i,u,small,code,div,p,[class*="cloze" i],[class*="answer" i],[data-answer]')].filter(ans).filter(x=>![...R].some(y=>y.contains(x))))}
+function prompt(a,r,U){const v=tx(a.textContent);let e=a,b=null;for(let i=0;e&&e!==r&&i<12;i++,e=e.parentElement){const t=tx(e.textContent);if(t.length>=v.length+3&&t.length<=3000){b=e;if(/^(P|LI|TD|TH|BLOCKQUOTE|H[1-6])$/.test(e.tagName||''))return e;if(e.tagName==='DIV'&&e.querySelectorAll('p,li,td,th').length<=2)return e}}return b||U.find(x=>x.contains(a)&&tx(x.textContent).length>v.length+2)||null}
+function path(r,n){const p=[];while(n&&n!==r){const q=n.parentNode;if(!q)return null;p.unshift([...q.childNodes].indexOf(n));n=q}return n===r?p:null}
+function at(r,p){for(const i of p||[]){r=r?.childNodes?.[i];if(!r)return null}return r}
+function later(a,p,skip=new Set){return a.filter(x=>!skip.has(x)&&x!==p&&!x.contains(p)&&!p.contains(x)&&(p.compareDocumentPosition(x)&N.DOCUMENT_POSITION_FOLLOWING))}
+function qa(q,a,tp,U,ix){const f=tx(q.map(x=>x.textContent).join(' ')),b=tx(a?.textContent);if(!f||!b)return null;return{id:hs([tp,f,b].join('\n---\n')),type:'qa',topic:tp,frontText:f,frontHtml:q.map(x=>html(clone(x))).join('\n'),backText:b,backHtml:html(clone(a))||esc(b),contextHtml:'',explanationHtml:later(U,a,new Set([...q,a])).slice(0,12).map(x=>html(clone(x))).join('\n'),ix}}
+function parse(r,ri){const A=blocks(r),R=refs(A,r),U=A.filter(x=>!R.has(x)),tp=topic(r,U),As=answers(r,R),C=[],X=[],used=new Set;
+As.forEach((a,i)=>{const p=prompt(a,r,U),ab=U.find(x=>x===a||x.contains(a)),av=tx(a.textContent),pv=tx(p?.textContent);if(p&&pv.length>=av.length+3){const c=clone(p),tg=at(c,path(p,a))||[...c.querySelectorAll('*')].find(x=>tx(x.textContent)===av);if(!tg){X.push(`Bloco ${ri+1}: falha ao localizar lacuna.`);return}tg.replaceWith(D.createTextNode('[...]'));const f=tx(c.textContent);C.push({id:hs([tp,f,av].join('\n---\n')),type:'cloze',topic:tp,frontText:f,frontHtml:html(c),backText:av,backHtml:esc(av),contextHtml:html(clone(p)),explanationHtml:later(U,p,new Set([p])).slice(0,14).map(x=>html(clone(x))).join('\n')});used.add(p);return}if(ab){let k=U.indexOf(ab)-1;while(k>=0&&used.has(U[k]))k--;const q=U[k],c=q&&qa([q],ab,tp,U,i);if(c){C.push(c);used.add(q);used.add(ab);return}}X.push(`Bloco ${ri+1}: resposta laranja sem contexto.`)});
+const Z=U.filter(x=>!used.has(x));for(let i=0;i<Z.length-1;i++){const q=Z[i],a=Z[i+1],qt=tx(q.textContent),bt=tx(a.textContent),bold=tx([...a.querySelectorAll('strong,b')].map(x=>x.textContent).join(' ')),ok=/\?\s*$/.test(qt)||/^(qual|quais|como|quando|onde|por que|porque|o que|cite|defina|descreva|explique)\b/i.test(qt)||/^(sim|não|nao|verdadeiro|falso|correto|incorreto)\b/i.test(bt)||(bt.length<=700&&bold.length/Math.max(1,bt.length)>=.4);if(ok){const c=qa([q],a,tp,U,i);if(c){C.push(c);used.add(q);used.add(a);i++}}}
+if(!C.length&&U.length>=2){const c=qa([U[0]],U[1],tp,U,0);if(c)C.push(c)}if(!C.length)X.push(`Bloco ${ri+1}: conteúdo não separado.`);return{cards:C,errors:X,answers:As.length}}
+function analyze(){const R=roots(),M=new Map,X=[];let cl=0,qaN=0,an=0;R.forEach((r,i)=>{const z=parse(r,i);an+=z.answers;z.cards.forEach(c=>{if(!M.has(c.id)){M.set(c.id,c);c.type==='cloze'?cl++:qaN++}});X.push(...z.errors)});const c=count(),cards=[...M.values()],complete=R.length>0&&(c.shown==null?cards.length>0:cards.length===c.shown);return{roots:R.length,cards,errors:X,clozeCards:cl,qaCards:qaN,orangeAnswers:an,expectedShown:c.shown,expectedTotal:c.total,complete}}
+function field(x){return`"${String(x||'').replace(/\r?\n/g,'<br>').replace(/\t/g,' ').replace(/"/g,'""')}"`}
+function tsv(C,name){const d=dn(name),H=['#separator:Tab','#html:true','#tags:osler','#columns:Frente\tVerso\tTags\tBaralho','#tags column:3','#deck column:4'],R=C.map(c=>{const f=`<span style="display:none">osler:${esc(c.id)}</span>${c.frontHtml||esc(c.frontText)}`,co=c.contextHtml?`<hr><strong>Contexto completo</strong><br>${c.contextHtml}`:'',ex=c.explanationHtml?`<hr><strong>Explicação</strong><br>${c.explanationHtml}`:'',b=`<strong>Resposta</strong><br>${c.backHtml||esc(c.backText)}${co}${ex}<hr><small>Assunto: ${esc(c.topic)} · ID: ${esc(c.id)}</small>`;return[f,b,`osler osler_consulta_${sl(d)} assunto_${sl(c.topic)} tipo_${c.type}`,d].map(field).join('\t')});return'\uFEFF'+[...H,...R].join('\n')+'\n'}
+function more(){return[...D.querySelectorAll('button,[role="button"],a')].find(x=>vis(x)&&!x.closest?.('#'+ID)&&fd([x.textContent,x.getAttribute?.('aria-label'),x.title].join(' ')).includes('carregar mais'))||null}
+async function load(){let c=count().shown||0,r=roots().length,stall=0;for(let i=0;i<200;i++){const b=more();if(!b)return;b.scrollIntoView?.({block:'center'});b.click();const s=Date.now();let nc=c,nr=r;while(Date.now()-s<1e4){await wait(250);nc=count().shown||nc;nr=roots().length;if(nc>c||nr>r||!more())break}status(`Consulta: ${nc||'?'} exibidos; ${nr} blocos reconhecidos.`);stall=nc>c||nr>r?0:stall+1;c=nc;r=nr;if(stall>=2)return}}
+function status(x,e=false,o=false){const n=P?.querySelector('[data-role="status"]');if(n){n.textContent=x;n.style.color=e?'#ff8a80':o?'#9ccc65':'#eee'}}
+function clear(){if(E?.url)try{W.URL.revokeObjectURL(E.url)}catch{}E=null;const a=P?.querySelector('[data-role="download"]');if(a)a.hidden=true}
+function infer(){const r=roots()[0];return r?topic(r,blocks(r)):'Osler'}
+function auto(){const i=P?.querySelector('[data-role="deck"]');if(i&&!edited&&fd(i.value)==='osler'){const x=infer();if(x&&x!=='Osler')i.value=x}}
+function render(z,i){clear();auto();const log=[`Versão: ${V}`,'Tela: Consulta',`Indicador da Osler: ${z.expectedShown??'?'} de ${z.expectedTotal??'?'}`,`Blocos reconhecidos: ${z.roots}`,`Respostas laranjas: ${z.orangeAnswers}`,`Cards cloze: ${z.clozeCards}`,`Cards pergunta-resposta: ${z.qaCards}`,`Cards únicos: ${z.cards.length}`,`Erros: ${z.errors.length}`,...z.errors].join('\n');P.querySelector('[data-role="log"]').value=log;if(!z.complete){P.querySelector('[data-role="raw"]').value='';status(`Exportação bloqueada: a Osler mostra ${z.expectedShown??'?'}, mas foram gerados ${z.cards.length}.`,true);return}const d=dn(i.value),x=tsv(z.cards,d),f=`osler-${sl(d).replace(/_/g,'-')}-${z.cards.length}-cards.tsv`,u=W.URL.createObjectURL(new W.Blob([x],{type:'text/tab-separated-values;charset=utf-8'}));E={tsv:x,filename:f,url:u};P.querySelector('[data-role="raw"]').value=x;const a=P.querySelector('[data-role="download"]');a.href=u;a.download=f;a.hidden=false;a.textContent=`Baixar TSV (${z.cards.length})`;status(`${z.cards.length} cards completos prontos para “${d}”.`,false,true)}
+async function run(all){if(B)return;const i=P.querySelector('[data-role="deck"]');if(!i.value.trim())return status('Digite o nome do baralho.',true);B=true;P.querySelectorAll('button').forEach(x=>x.disabled=true);try{if(all){status('Carregando toda a Consulta…');await load()}auto();status('Reconhecendo e validando todos os cards…');render(analyze(),i)}catch(e){status(e?.message||String(e),true)}finally{B=false;P.querySelectorAll('button').forEach(x=>x.disabled=false)}}
+function install(){if(!D.body||D.getElementById(ID))return;['osler-anki-consult-exporter-v100','osler-anki-consult-exporter-v101','osler-anki-consulta-v110','osler-anki-bridge-v0410','osler-anki-session-controls-v0411','osler-anki-session-controls-v0412','osler-anki-question-fix-v0412'].forEach(x=>D.getElementById(x)?.remove());P=D.createElement('section');P.id=ID;P.innerHTML=`<div><strong>Osler → Anki · Consulta ${V}</strong> <button data-action="toggle">−</button></div><div data-role="body"><label>Nome do baralho</label><input data-role="deck" value="${esc(infer())}"><div><button data-action="all">Carregar tudo e gerar TSV</button><button data-action="visible">Analisar carregados</button></div><div><a data-role="download" hidden>Baixar TSV</a> <button data-action="gm">Baixar via Violentmonkey</button> <button data-action="copy">Copiar TSV</button></div><div data-role="status">Consulta detectada.</div><details><summary>Diagnóstico</summary><textarea data-role="log" rows="9"></textarea></details><details><summary>TSV bruto</summary><textarea data-role="raw" rows="8"></textarea></details></div>`;P.style.cssText='position:fixed;z-index:2147483647;top:8px;right:8px;width:min(440px,calc(100vw - 16px));max-height:84vh;overflow:auto;background:#17191d;color:#eee;border:1px solid #ff6d2d;border-radius:10px;padding:9px;font:12px system-ui;box-sizing:border-box';P.querySelectorAll('input,textarea').forEach(x=>{x.style.width='100%';x.style.boxSizing='border-box'});D.body.appendChild(P);const i=P.querySelector('[data-role="deck"]');i.oninput=()=>{edited=true;clear()};P.querySelector('[data-action="toggle"]').onclick=e=>{const b=P.querySelector('[data-role="body"]');b.hidden=!b.hidden;e.currentTarget.textContent=b.hidden?'+':'−'};P.querySelector('[data-action="all"]').onclick=()=>run(true);P.querySelector('[data-action="visible"]').onclick=()=>run(false);P.querySelector('[data-action="copy"]').onclick=async()=>{if(!E)return status('Nenhum TSV completo foi preparado.',true);try{await GM_setClipboard(E.tsv,'text');status('TSV copiado.',false,true)}catch{status('Falha ao copiar.',true)}};P.querySelector('[data-action="gm"]').onclick=async()=>{if(!E)return status('Nenhum TSV completo foi preparado.',true);try{await GM_download({url:E.url,name:E.filename,saveAs:false})}catch{status('Use o link Baixar TSV.',true)}}}
+function isConsult(){const b=fd(D.body?.innerText);return/(?:^|\/)(?:consult|consulta)(?:\/|$)/i.test(W.location.pathname)||count().shown!=null||(b.includes('carregar mais')&&roots().length)||(b.includes('flashcards com varias lacunas')&&roots().length)}
+function sync(){T=null;if(!D.body)return;if(isConsult()){install();auto()}else if(P){clear();P.remove();P=null;edited=false}}
+function sch(n=80){if(T)W.clearTimeout(T);T=W.setTimeout(sync,n)}
+function hook(n){const o=W.history?.[n];if(typeof o!=='function'||o.__oa12)return;W.history[n]=function(...a){const r=o.apply(this,a);sch(0);sch(500);return r};W.history[n].__oa12=true}
+const API={VERSION:V,analyze,buildTsv:tsv,cardRoots:roots,expectedCounts:count,hash:hs,normalizeDeckName:dn,orange,parseColor:rgb};W.OslerAnkiConsultaV120=API;if(typeof module!='undefined'&&module.exports)module.exports=API;else{hook('pushState');hook('replaceState');W.addEventListener('popstate',()=>sch(0));D.addEventListener('DOMContentLoaded',()=>sch(0),{once:true});const ob=()=>{if(D.documentElement)new W.MutationObserver(()=>sch(180)).observe(D.documentElement,{childList:true,subtree:true})};D.documentElement?ob():D.addEventListener('DOMContentLoaded',ob,{once:true});W.setInterval(sync,900);sch(0)}})();
