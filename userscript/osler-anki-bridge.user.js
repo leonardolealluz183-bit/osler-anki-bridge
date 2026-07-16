@@ -24,7 +24,9 @@
   const AUDIT_KEY = 'oslerAnkiBridge.audit.v1';
   const CORE_PANEL_ID = 'osler-anki-bridge-v047';
   const PATCH_MARKER = 'data-osler-v048-patched';
-  const page = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+  const page = typeof unsafeWindow !== 'undefined'
+    ? unsafeWindow
+    : (typeof window !== 'undefined' ? window : globalThis);
 
   function normalizeWhitespace(value) {
     return String(value || '').replace(/\s+/g, ' ').trim();
@@ -50,13 +52,14 @@
 
   function storedArray(key) {
     try {
-      return parseArray(GM_getValue(key, []));
+      if (typeof GM_getValue === 'function') return parseArray(GM_getValue(key, []));
     } catch (_error) {
-      try {
-        return parseArray(page.localStorage?.getItem?.(key));
-      } catch (_localError) {
-        return [];
-      }
+      // Tenta o espelho local abaixo.
+    }
+    try {
+      return parseArray(page.localStorage?.getItem?.(key));
+    } catch (_localError) {
+      return [];
     }
   }
 
@@ -92,6 +95,7 @@
   }
 
   function anchorDownload(contents, filename, mimeType) {
+    if (!page.document?.body) throw new Error('documento da página indisponível');
     const resource = pageBlobUrl(contents, mimeType);
     const anchor = page.document.createElement('a');
     anchor.href = resource.url;
@@ -196,20 +200,20 @@
     }, null, 2)}\n`;
   }
 
-  function latestFailureSummary() {
-    const events = audit();
+  function failureSummaryFromEvents(events) {
+    const list = Array.isArray(events) ? events : [];
     let failureIndex = -1;
-    for (let index = events.length - 1; index >= 0; index -= 1) {
-      if (events[index]?.status === 'failed') {
+    for (let index = list.length - 1; index >= 0; index -= 1) {
+      if (list[index]?.status === 'failed') {
         failureIndex = index;
         break;
       }
     }
     if (failureIndex < 0) return 'Nenhuma falha registrada.';
 
-    const failure = events[failureIndex];
+    const failure = list[failureIndex];
     const failureQuestion = normalizeText(failure.question);
-    const recovered = events.slice(failureIndex + 1).some((event) => {
+    const recovered = list.slice(failureIndex + 1).some((event) => {
       if (event?.status !== 'added') return false;
       if (failure.id && event.id === failure.id) return true;
       return failureQuestion && normalizeText(event.question) === failureQuestion;
@@ -217,6 +221,10 @@
     const question = normalizeWhitespace(failure.question) || 'pergunta não identificada';
     const detail = normalizeWhitespace(failure.detail) || 'motivo não registrado';
     return `Última falha: ${question} — ${detail}.${recovered ? ' O card foi capturado depois.' : ' Não há captura posterior confirmada no log.'}`;
+  }
+
+  function latestFailureSummary() {
+    return failureSummaryFromEvents(audit());
   }
 
   function createButton(label, action) {
@@ -238,10 +246,8 @@
     const title = panel.querySelector('strong');
     if (title) title.textContent = `Osler Anki Bridge — ${VERSION}`;
 
-    const oldDownload = panel.querySelector('[data-action="download"]');
-    const oldAudit = panel.querySelector('[data-action="audit"]');
-    oldDownload?.remove();
-    oldAudit?.remove();
+    panel.querySelector('[data-action="download"]')?.remove();
+    panel.querySelector('[data-action="audit"]')?.remove();
 
     const captureButton = panel.querySelector('[data-action="capture"]');
     const controls = page.document.createElement('div');
@@ -277,6 +283,7 @@
 
     controls.appendChild(createButton('Copiar log', () => {
       try {
+        if (typeof GM_setClipboard !== 'function') throw new Error('GM_setClipboard indisponível');
         GM_setClipboard(buildLog(), 'text');
         setMessage(panel, 'LOG COPIADO — pode colar diretamente na conversa.', 'added');
       } catch (error) {
@@ -300,16 +307,24 @@
   }
 
   function waitAndPatch() {
-    const panel = page.document.getElementById(CORE_PANEL_ID);
+    const panel = page.document?.getElementById?.(CORE_PANEL_ID);
     if (patchPanel(panel)) return;
-    page.setTimeout(waitAndPatch, 100);
+    page.setTimeout?.(waitAndPatch, 100);
   }
 
-  waitAndPatch();
-  page.OslerAnkiBridgeV048 = {
+  const api = {
     buildLog,
     buildTsv,
+    failureSummaryFromEvents,
     latestFailureSummary,
+    parseArray,
     patchPanel,
   };
+
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = api;
+  } else if (page.document) {
+    waitAndPatch();
+    page.OslerAnkiBridgeV048 = api;
+  }
 })();
