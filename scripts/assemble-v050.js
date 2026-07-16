@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const zlib = require('node:zlib');
 
+// Deterministic assembly from the reviewed compressed source parts.
 const root = path.resolve(__dirname, '..');
 const partsDir = path.join(root, 'build', 'v050');
 const encoded = fs.readdirSync(partsDir)
