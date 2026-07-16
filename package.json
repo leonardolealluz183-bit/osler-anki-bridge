@@ -1,8 +1,8 @@
 {
   "name": "osler-anki-bridge",
-  "version": "0.4.7",
+  "version": "0.4.8",
   "private": true,
-  "description": "Captura transacional de cards da Osler, confirma o avanço, mantém fila permanente e exporta TSV.",
+  "description": "Captura transacional da Osler com avanço confirmado, fila permanente e exportação confiável no Firefox Android.",
   "scripts": {
     "test": "node --test",
     "lint": "node --check userscript/osler-anki-bridge.user.js && node --check docs/osler-anki-bridge.user.js && node --check tests/osler-anki-bridge.test.js"
