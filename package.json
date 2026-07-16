@@ -1,8 +1,8 @@
 {
   "name": "osler-anki-bridge",
-  "version": "0.4.9",
+  "version": "0.4.10",
   "private": true,
-  "description": "Captura transacional da Osler em um único script, com fila redundante, avanço confirmado, baralho por assunto e exportação recuperável.",
+  "description": "Captura transacional da Osler com fila redundante, baralhos por assunto, exportação recuperável e painel móvel.",
   "scripts": {
     "test": "node --test",
     "lint": "node --check userscript/osler-anki-bridge.user.js && node --check docs/osler-anki-bridge.user.js && node --check tests/osler-anki-bridge.test.js"
