@@ -1,8 +1,8 @@
 {
   "name": "osler-anki-bridge",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
-  "description": "Exportação em lote dos flashcards do modo Consulta da Osler para um baralho único do Anki.",
+  "description": "Exportação completa e validada dos flashcards do modo Consulta da Osler para o AnkiDroid.",
   "scripts": {
     "test": "node --test",
     "lint": "node --check docs/osler-anki-consult.user.js && node --check tests/osler-anki-consult.test.js && node --check userscript/osler-anki-bridge.user.js && node --check docs/osler-anki-bridge.user.js && node --check userscript/osler-anki-bridge-v050.user.js && node --check docs/osler-anki-bridge-v050.user.js && node --check userscript/osler-anki-sessions.user.js && node --check docs/osler-anki-sessions.user.js && node --check docs/osler-anki-sessions-v0412.user.js && node --check userscript/osler-anki-question-fix.user.js && node --check docs/osler-anki-question-fix.user.js && node --check tests/osler-anki-bridge.test.js && node --check tests/osler-anki-bridge-v050.test.js && node --check tests/osler-anki-sessions.test.js && node --check tests/osler-anki-sessions-v0412.test.js"
