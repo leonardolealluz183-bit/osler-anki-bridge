@@ -29,12 +29,18 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - name: Assemble and validate
+      - name: Inspect source parts
         run: |
-          node scripts/assemble-v050.js
-          node --check docs/osler-anki-bridge-v050.user.js
-          node --check userscript/osler-anki-bridge-v050.user.js
-          cmp docs/osler-anki-bridge-v050.user.js userscript/osler-anki-bridge-v050.user.js
+          wc -c build/v050/part*.b64
+          cat build/v050/part*.b64 | tr -d '\n\r ' | wc -c
+      - name: Assemble userscript
+        run: node scripts/assemble-v050.js
+      - name: Check published syntax
+        run: node --check docs/osler-anki-bridge-v050.user.js
+      - name: Check source syntax
+        run: node --check userscript/osler-anki-bridge-v050.user.js
+      - name: Compare generated copies
+        run: cmp docs/osler-anki-bridge-v050.user.js userscript/osler-anki-bridge-v050.user.js
       - name: Commit generated userscript
         run: |
           git config user.name github-actions[bot]
