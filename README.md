@@ -1,36 +1,30 @@
 # Osler Anki Bridge
 
-Userscript Android-only que captura cards marcados como **Errei** ou **Difícil** na Osler, salva antes de avançar e exporta para o AnkiDroid.
+Userscript Android-only que captura cards marcados como **Errei** ou **Difícil** na Osler, mantém uma fila redundante e exporta os cards para o AnkiDroid em baralhos definidos pelo assunto.
 
-## Versão 0.4.9 — Fase 2
+## Versão 0.4.10 — Fase 2
 
-A 0.4.9 substitui completamente a 0.4.8. É um único userscript, sem `@require` e sem patch separado.
+A 0.4.10 corrige o painel que bloqueava a seleção e o início dos flashcards na tela da Osler.
 
 Correções principais:
 
-- une cards encontrados no armazenamento permanente do Violentmonkey, no backup permanente e no `localStorage` da Osler;
-- grava a fila simultaneamente nesses locais após cada captura;
-- separa no painel `carregados anteriormente` de `adicionados nesta sessão`;
-- mantém a captura transacional e só avança depois de salvar;
-- mantém o card na tela quando a resposta não pode ser capturada;
-- exporta cada card para um baralho com o nome do assunto, usando `Osler` apenas como fallback;
-- oferece links nativos de download para TSV e log;
-- oferece download alternativo por `GM_download`;
-- mantém TSV, log e backup completo visíveis em caixas de texto para recuperação manual;
-- permite copiar TSV e log;
-- permite importar novamente um backup JSON colado;
-- mostra permanentemente a última falha e informa se ela foi capturada depois;
-- prepara automaticamente a exportação ao entrar em `/test/report`, sem varrer a página pesada.
+- o painel inicia **minimizado** por padrão;
+- a barra superior pode ser arrastada com toque, mouse ou trackpad;
+- a posição e o estado minimizado são preservados entre páginas e sessões;
+- o botão `+` abre o painel e o botão `−` o minimiza;
+- o botão `↗` devolve o painel ao canto superior direito;
+- o painel é limitado ao tamanho da tela e não pode ficar perdido fora da área visível;
+- preserva a fila redundante da 0.4.9, a recuperação de cards antigos, o avanço confirmado, os downloads e as caixas de recuperação;
+- continua usando o assunto de cada card como nome do baralho no AnkiDroid.
 
 ## Fluxo
 
-1. Pressione **Espaço** para mostrar a resposta.
-2. Pressione **1** para Errei ou **2** para Difícil.
-3. O painel mostra `SALVO E AVANÇOU` quando a operação termina.
-4. No relatório, confira quantos cards foram carregados antes e quantos foram adicionados na sessão.
-5. Use **Baixar TSV (link)** como método principal.
-6. Como contingência, use **Baixar TSV via Violentmonkey**, **Abrir TSV**, **Copiar TSV** ou copie a caixa `TSV bruto`.
-7. O campo `Baralho` do TSV recebe o assunto de cada card.
+1. O painel aparece como uma barra pequena: `Osler Anki Bridge 0.4.10 · N cards`.
+2. Arraste essa barra para qualquer canto livre da tela.
+3. Use `+` somente quando precisar consultar contadores, exportar ou recuperar dados.
+4. Minimize novamente com `−` antes de iniciar os flashcards.
+5. Durante o teste: **Espaço** mostra a resposta, **1** registra Errei e **2** registra Difícil.
+6. Ao terminar, abra o painel, prepare a exportação e baixe TSV e log.
 
 ## Desenvolvimento
 
