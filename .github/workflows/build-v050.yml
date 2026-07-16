@@ -1,6 +1,13 @@
 name: Build unified v0.5.0
 
 on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'build/v050/**'
+      - 'scripts/assemble-v050.js'
+      - '.github/workflows/build-v050.yml'
   push:
     branches:
       - phase-2-android-bridge
