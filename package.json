@@ -1,11 +1,11 @@
 {
   "name": "osler-anki-bridge",
-  "version": "0.4.10",
+  "version": "0.4.11",
   "private": true,
-  "description": "Captura transacional da Osler com fila redundante, baralhos por assunto, exportação recuperável e painel móvel.",
+  "description": "Captura transacional da Osler com fila redundante e sessões nomeadas para exportar um TSV único por tema.",
   "scripts": {
     "test": "node --test",
-    "lint": "node --check userscript/osler-anki-bridge.user.js && node --check docs/osler-anki-bridge.user.js && node --check tests/osler-anki-bridge.test.js"
+    "lint": "node --check userscript/osler-anki-bridge.user.js && node --check docs/osler-anki-bridge.user.js && node --check userscript/osler-anki-sessions.user.js && node --check docs/osler-anki-sessions.user.js && node --check tests/osler-anki-bridge.test.js && node --check tests/osler-anki-sessions.test.js"
   },
   "engines": {
     "node": ">=20"
