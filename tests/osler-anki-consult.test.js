@@ -3,7 +3,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const exporter = require('../userscript/osler-anki-consult.user.js');
+global.window = globalThis;
+const exporter = require('../docs/osler-anki-consult.user.js');
 
 function card(id, topic, frontText, backText) {
   return {
@@ -14,32 +15,26 @@ function card(id, topic, frontText, backText) {
     backText,
     backHtml: backText,
     explanationHtml: '',
-    warnings: [],
   };
 }
 
-test('is a single consult-only userscript without dependencies', () => {
-  const source = fs.readFileSync(path.join(__dirname, '../userscript/osler-anki-consult.user.js'), 'utf8');
+test('loads on the whole Osler site and activates only on the consult route', () => {
   const published = fs.readFileSync(path.join(__dirname, '../docs/osler-anki-consult.user.js'), 'utf8');
-  assert.equal(source, published);
-  assert.match(source, /@version\s+1\.0\.0/);
-  assert.match(source, /@match\s+https:\/\/oslermedicina\.com\.br\/consult\*/);
-  assert.doesNotMatch(source, /@require/);
-  assert.doesNotMatch(source, /\/test\*/);
+  assert.match(published, /@version\s+1\.0\.1/);
+  assert.match(published, /@match\s+https:\/\/oslermedicina\.com\.br\/\*/);
+  assert.match(published, /@run-at\s+document-start/);
+  assert.match(published, /function onConsultRoute\(\)/);
+  assert.match(published, /hookHistory\('pushState'\)/);
+  assert.match(published, /setInterval\(routeSync, 500\)/);
+  assert.doesNotMatch(published, /@require/);
 });
 
 test('recognizes the orange tones used for revealed answers', () => {
-  assert.equal(exporter.isOrangeRgb([255, 93, 34]), true);
-  assert.equal(exporter.isOrangeRgb([239, 108, 38]), true);
-  assert.equal(exporter.isOrangeRgb([230, 120, 70]), true);
-  assert.equal(exporter.isOrangeRgb([255, 255, 255]), false);
-  assert.equal(exporter.isOrangeRgb([55, 120, 220]), false);
-});
-
-test('parses rgb and hexadecimal CSS colors', () => {
-  assert.deepEqual(exporter.parseCssColor('rgb(255, 93, 34)'), [255, 93, 34]);
-  assert.deepEqual(exporter.parseCssColor('#ff5d22'), [255, 93, 34]);
-  assert.deepEqual(exporter.parseCssColor('#f62'), [255, 102, 34]);
+  assert.equal(exporter.orangeColor('rgb(255, 93, 34)'), true);
+  assert.equal(exporter.orangeColor('rgb(239, 108, 38)'), true);
+  assert.equal(exporter.orangeColor('rgb(230, 120, 70)'), true);
+  assert.equal(exporter.orangeColor('rgb(255, 255, 255)'), false);
+  assert.equal(exporter.orangeColor('rgb(55, 120, 220)'), false);
 });
 
 test('uses one explicit deck for every exported card', () => {
@@ -53,12 +48,14 @@ test('uses one explicit deck for every exported card', () => {
   assert.match(tsv, /assunto_diretrizes_do_sus/);
 });
 
-test('deduplicates cards by stable id without deleting different cards', () => {
-  const first = card('same', 'SUS', 'A', 'B');
-  const second = card('other', 'SUS', 'C', 'D');
-  assert.deepEqual(exporter.dedupeCards([first, first, second]).map((item) => item.id), ['same', 'other']);
+test('produces stable ids for equal content and different ids for different content', () => {
+  assert.equal(exporter.stableHash('mesmo'), exporter.stableHash('mesmo'));
+  assert.notEqual(exporter.stableHash('um'), exporter.stableHash('dois'));
 });
 
-test('sanitizes deck hierarchy separators', () => {
-  assert.equal(exporter.safeDeckName('Preventiva::SUS'), 'Preventiva — SUS');
+test('sanitizes deck hierarchy separators inside TSV output', () => {
+  const tsv = exporter.buildTsv([
+    card('a', 'SUS', 'Pergunta', 'Resposta'),
+  ], 'Preventiva::SUS');
+  assert.match(tsv, /\t"Preventiva — SUS"\n/);
 });
