@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Osler Anki Bridge
 // @namespace    https://github.com/osler-anki-bridge/osler-anki-bridge
-// @version      0.4.9
-// @description  Captura transacional da Osler em um único script, com fila redundante, avanço confirmado e exportação recuperável.
+// @version      0.4.10
+// @description  Captura transacional da Osler com fila redundante, baralhos por assunto, exportação recuperável e painel móvel.
 // @match        https://oslermedicina.com.br/*
 // @match        https://*.oslermedicina.com.br/*
 // @grant        GM_getValue
@@ -18,19 +18,20 @@
 (function bootstrap() {
   'use strict';
 
-  const VERSION = '0.4.9';
+  const VERSION = '0.4.10';
   const QUEUE_KEY = 'oslerAnkiBridge.queue.v1';
   const QUEUE_BACKUP_KEY = 'oslerAnkiBridge.queue.backup.v1';
   const AUDIT_KEY = 'oslerAnkiBridge.audit.v1';
   const AUDIT_BACKUP_KEY = 'oslerAnkiBridge.audit.backup.v1';
+  const PANEL_STATE_KEY = 'oslerAnkiBridge.panel.v1';
   const FALLBACK_DECK = 'Osler';
-  const PANEL_ID = 'osler-anki-bridge-v049';
+  const PANEL_ID = 'osler-anki-bridge-v0410';
   const CLOZE_SELECTOR = '.cloze-answer,[class*="cloze-answer"],[class*="ClozeAnswer"],[class*="clozeAnswer"]';
-  const SENSITIVE_QUERY_PARAM = /^(token|access_token|auth|authorization|signature|sig|key|jwt)$/i;
   const CAPTURE_RETRY_MS = 60;
   const CAPTURE_TIMEOUT_MS = 2500;
   const ADVANCE_CONFIRM_MS = 950;
   const ADVANCE_POLL_MS = 50;
+  const SENSITIVE_QUERY_PARAM = /^(token|access_token|auth|authorization|signature|sig|key|jwt)$/i;
 
   const pageWindow = typeof unsafeWindow !== 'undefined'
     ? unsafeWindow
@@ -51,6 +52,7 @@
   let exportPreparedCount = 0;
   let exportUrls = { tsv: '', log: '' };
   let lastExport = { tsv: '', log: '', backup: '', tsvName: '', logName: '' };
+  let panelState = { minimized: true, left: null, top: 12 };
 
   const now = () => new Date().toISOString();
   const sleep = (milliseconds) => new Promise((resolve) => pageWindow.setTimeout(resolve, milliseconds));
@@ -163,7 +165,6 @@
         .replace(/<svg\b[^>]*>[\s\S]*?<\/svg>/gi, '')
         .replace(/<img\b[^>]*>/gi, '<div><em>[Imagem disponível na Osler]</em></div>');
     }
-
     template.innerHTML = clean;
     if (!template.content?.querySelectorAll) return clean;
     template.content.querySelectorAll('button,svg').forEach((node) => node.remove());
@@ -184,12 +185,10 @@
     if (!element || element.hidden || hiddenByAncestor(element) || element.closest?.(`#${PANEL_ID}`)) {
       return { visible: false, ratio: 0, centerDistance: Infinity };
     }
-
     const style = pageWindow.getComputedStyle?.(element);
     if (style && (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0)) {
       return { visible: false, ratio: 0, centerDistance: Infinity };
     }
-
     const rect = element.getBoundingClientRect?.();
     if (!rect || !Number.isFinite(rect.top)) {
       const visible = typeof element.getClientRects === 'function'
@@ -197,7 +196,6 @@
         : element.offsetParent !== null;
       return { visible, ratio: visible ? 1 : 0, centerDistance: 0 };
     }
-
     const viewportWidth = Number(pageWindow.innerWidth) || Number(documentRef?.documentElement?.clientWidth) || 1920;
     const viewportHeight = Number(pageWindow.innerHeight) || Number(documentRef?.documentElement?.clientHeight) || 1080;
     const width = Math.max(0, Number(rect.width) || Number(rect.right) - Number(rect.left));
@@ -206,15 +204,14 @@
     const intersectionHeight = Math.max(0, Math.min(rect.bottom, viewportHeight) - Math.max(rect.top, 0));
     const area = Math.max(1, width * height);
     const intersection = intersectionWidth * intersectionHeight;
-    const ratio = intersection / area;
-    const center = Number(rect.top) + height / 2;
-    const centerDistance = Math.abs(center - viewportHeight / 2);
-    return { visible: intersection > 0 && width > 0 && height > 0, ratio, centerDistance };
+    return {
+      visible: intersection > 0 && width > 0 && height > 0,
+      ratio: intersection / area,
+      centerDistance: Math.abs(Number(rect.top) + height / 2 - viewportHeight / 2),
+    };
   }
 
-  function isVisible(element) {
-    return visibilityMetrics(element).visible;
-  }
+  const isVisible = (element) => visibilityMetrics(element).visible;
 
   function isBefore(first, second) {
     if (!first || !second || first === second || typeof first.compareDocumentPosition !== 'function' || !pageWindow.Node) return false;
@@ -241,11 +238,7 @@
     const topic = normalizeWhitespace(strong?.textContent);
     const remainder = paragraphRemainder(element);
     if (!strong || !topic || isVerdictOnly(topic) || remainder.length < 3) return -Infinity;
-
-    let score = Math.min(text.length, 180) / 20;
-    score += 45;
-    score += metrics.ratio * 100;
-    score -= metrics.centerDistance / 50;
+    let score = Math.min(text.length, 180) / 20 + 45 + metrics.ratio * 100 - metrics.centerDistance / 50;
     if (element.querySelector?.(CLOZE_SELECTOR)) score += 100;
     if (/\?$/.test(text)) score += 20;
     else if (/[:.]$/.test(text)) score += 8;
@@ -253,10 +246,9 @@
   }
 
   function findQuestionElement(doc = documentRef) {
-    const candidates = Array.from(doc.querySelectorAll?.('p') || []);
     let best = null;
     let bestScore = -Infinity;
-    candidates.forEach((candidate) => {
+    Array.from(doc.querySelectorAll?.('p') || []).forEach((candidate) => {
       const score = questionScore(candidate);
       if (score > bestScore) {
         best = candidate;
@@ -270,7 +262,6 @@
     if (!question) return null;
     const explanations = Array.from(doc.querySelectorAll?.('div.osler-card-explanation') || [])
       .filter((element) => isVisible(element) && isBefore(question, element));
-    if (!explanations.length) return null;
     return explanations.sort((first, second) => {
       const firstTop = first.getBoundingClientRect?.().top ?? Infinity;
       const secondTop = second.getBoundingClientRect?.().top ?? Infinity;
@@ -305,8 +296,7 @@
       const text = normalizeWhitespace(node.textContent);
       if (!text && !node.querySelector?.('img')) return false;
       if (isCitationText(text)) return false;
-      if (/^(anterior|proximo|próximo|salvar|enterrar|feedback|estatisticas|estatísticas)$/i.test(text)) return false;
-      return true;
+      return !/^(anterior|proximo|próximo|salvar|enterrar|feedback|estatisticas|estatísticas)$/i.test(text);
     });
     return candidates.filter((node) => !candidates.some((other) => other !== node && other.contains?.(node)));
   }
@@ -345,9 +335,8 @@
         text: normalizeWhitespace(node.textContent),
         html: sanitizeHtml(node.innerHTML, doc),
       })).filter((item) => item.text || item.html);
-
-      const candidates = contentCandidates(root, question, explanation);
-      const contextBlocks = candidates.filter((block) => allClozes.some((cloze) => block.contains?.(cloze)));
+      const contextBlocks = contentCandidates(root, question, explanation)
+        .filter((block) => allClozes.some((cloze) => block.contains?.(cloze)));
       const contextHtml = [];
       const contextText = [];
       contextBlocks.forEach((block) => {
@@ -356,7 +345,6 @@
         contextHtml.push(sanitizeHtml(clone.outerHTML || clone.innerHTML, doc));
         contextText.push(normalizeWhitespace(clone.textContent));
       });
-
       return {
         answer: {
           source: question.querySelector?.(CLOZE_SELECTOR) ? 'question-cloze' : 'body-cloze',
@@ -364,45 +352,31 @@
           text: items.map((item) => item.text).filter(Boolean).join('; '),
           html: items.map((item) => item.html).filter(Boolean).join('; '),
         },
-        frontContext: {
-          text: contextText.filter(Boolean).join(' '),
-          html: contextHtml.filter(Boolean).join('\n'),
-        },
+        frontContext: { text: contextText.join(' '), html: contextHtml.join('\n') },
       };
     }
 
     const candidates = contentCandidates(root, question, explanation);
     if (!candidates.length) {
-      return {
-        answer: { source: 'missing', items: [], text: '', html: '' },
-        frontContext: { text: '', html: '' },
-      };
+      return { answer: { source: 'missing', items: [], text: '', html: '' }, frontContext: { text: '', html: '' } };
     }
-
     let selected = [];
     const firstList = candidates.find((node) => ['ul', 'ol', 'table'].includes(String(node.tagName || '').toLowerCase()));
-    if (firstList) {
-      selected = [firstList];
-    } else {
+    if (firstList) selected = [firstList];
+    else {
       for (const node of candidates) {
-        const text = normalizeWhitespace(node.textContent);
-        if (isCitationText(text)) break;
+        if (isCitationText(normalizeWhitespace(node.textContent))) break;
         selected.push(node);
         if (selected.length >= 4) break;
       }
     }
-
     const items = [];
     selected.forEach((block) => {
       const listItems = Array.from(block.querySelectorAll?.('li') || []);
       (listItems.length ? listItems : [block]).forEach((node) => {
-        items.push({
-          text: normalizeWhitespace(node.textContent),
-          html: sanitizeHtml(node.innerHTML, doc),
-        });
+        items.push({ text: normalizeWhitespace(node.textContent), html: sanitizeHtml(node.innerHTML, doc) });
       });
     });
-
     return {
       answer: {
         source: explanation ? 'intermediate-block' : 'card-body',
@@ -421,31 +395,18 @@
     const explanationElement = findExplanationForQuestion(questionElement, doc);
     const root = chooseRoot(questionElement, explanationElement);
     if (!root) return null;
-
     const questionClone = questionElement.cloneNode(true);
     replaceClozesWithBlank(questionClone, doc);
     const topicElement = questionElement.querySelector('strong');
     const topic = normalizeWhitespace(topicElement?.textContent).replace(/[\s.:;,!?–—-]+$/u, '');
     const response = extractResponse(questionElement, explanationElement, root, doc);
-    const hiddenQuestionText = normalizeWhitespace([
-      questionClone.textContent,
-      response.frontContext.text,
-    ].filter(Boolean).join(' '));
-    const hiddenQuestionHtml = [
-      sanitizeHtml(questionClone.innerHTML, doc),
-      response.frontContext.html,
-    ].filter(Boolean).join('\n');
     const explanationText = explanationElement ? normalizeWhitespace(explanationElement.textContent) : '';
     const explanationHtml = explanationElement ? sanitizeHtml(explanationElement.innerHTML, doc) : '';
-
     const card = {
-      id: '',
-      trigger: '',
-      capturedAt: now(),
-      url: pageWindow.location?.href || '',
+      id: '', trigger: '', capturedAt: now(), url: pageWindow.location?.href || '',
       question: {
-        text: hiddenQuestionText,
-        html: hiddenQuestionHtml,
+        text: normalizeWhitespace([questionClone.textContent, response.frontContext.text].filter(Boolean).join(' ')),
+        html: [sanitizeHtml(questionClone.innerHTML, doc), response.frontContext.html].filter(Boolean).join('\n'),
         revealedText: normalizeWhitespace(questionElement.textContent),
         revealedHtml: sanitizeHtml(questionElement.innerHTML, doc),
       },
@@ -454,12 +415,7 @@
       topic: { text: topic, html: sanitizeHtml(topicElement?.innerHTML || escapeHtml(topic), doc) },
       deck: { text: topic, html: sanitizeHtml(topicElement?.innerHTML || escapeHtml(topic), doc) },
     };
-    card.id = stableHash([
-      card.topic.text,
-      card.question.text,
-      card.answer.text,
-      card.explanation.text,
-    ].join('\n---\n'));
+    card.id = stableHash([card.topic.text, card.question.text, card.answer.text, card.explanation.text].join('\n---\n'));
     return card;
   }
 
@@ -472,9 +428,7 @@
     const reasons = [];
     if (!question) reasons.push('pergunta vazia');
     if (!answer && !/<(img|li|ul|ol|table)\b/i.test(answerHtml)) reasons.push('resposta vazia');
-    if (!answerSource.includes('cloze') && (answer.includes('[...]') || answerHtml.includes('[...]'))) {
-      reasons.push('resposta ainda não revelada');
-    }
+    if (!answerSource.includes('cloze') && (answer.includes('[...]') || answerHtml.includes('[...]'))) reasons.push('resposta ainda não revelada');
     if (isVerdictOnly(question)) reasons.push('pergunta é só um veredito');
     if (isVerdictOnly(topic)) reasons.push('assunto é só um veredito');
     return { valid: reasons.length === 0, reasons };
@@ -536,15 +490,16 @@
     }
   }
 
-  function readLocalArray(key) {
+  function readLocalJson(key, fallback) {
     try {
-      return parseStoredValue(pageWindow.localStorage?.getItem?.(key));
+      const raw = pageWindow.localStorage?.getItem?.(key);
+      return raw ? JSON.parse(raw) : fallback;
     } catch (_error) {
-      return [];
+      return fallback;
     }
   }
 
-  function writeLocalArray(key, value) {
+  function writeLocalJson(key, value) {
     try {
       pageWindow.localStorage?.setItem?.(key, JSON.stringify(value));
       return true;
@@ -554,25 +509,30 @@
   }
 
   async function loadState() {
-    const [gmQueue, gmQueueBackup, gmAudit, gmAuditBackup] = await Promise.all([
+    const [gmQueue, gmQueueBackup, gmAudit, gmAuditBackup, gmPanelState] = await Promise.all([
       gmGetValueSafe(QUEUE_KEY, []),
       gmGetValueSafe(QUEUE_BACKUP_KEY, []),
       gmGetValueSafe(AUDIT_KEY, []),
       gmGetValueSafe(AUDIT_BACKUP_KEY, []),
+      gmGetValueSafe(PANEL_STATE_KEY, null),
     ]);
-
     queue = mergeCardArrays(
-      parseStoredValue(gmQueue),
-      parseStoredValue(gmQueueBackup),
-      readLocalArray(QUEUE_KEY),
-      readLocalArray(QUEUE_BACKUP_KEY),
+      parseStoredValue(gmQueue), parseStoredValue(gmQueueBackup),
+      parseStoredValue(readLocalJson(QUEUE_KEY, [])), parseStoredValue(readLocalJson(QUEUE_BACKUP_KEY, [])),
     );
     audit = mergeAuditArrays(
-      parseStoredValue(gmAudit),
-      parseStoredValue(gmAuditBackup),
-      readLocalArray(AUDIT_KEY),
-      readLocalArray(AUDIT_BACKUP_KEY),
+      parseStoredValue(gmAudit), parseStoredValue(gmAuditBackup),
+      parseStoredValue(readLocalJson(AUDIT_KEY, [])), parseStoredValue(readLocalJson(AUDIT_BACKUP_KEY, [])),
     );
+    const localPanelState = readLocalJson(PANEL_STATE_KEY, null);
+    const recoveredPanelState = gmPanelState && typeof gmPanelState === 'object' ? gmPanelState : localPanelState;
+    if (recoveredPanelState && typeof recoveredPanelState === 'object') {
+      panelState = {
+        minimized: recoveredPanelState.minimized !== false,
+        left: Number.isFinite(Number(recoveredPanelState.left)) ? Number(recoveredPanelState.left) : null,
+        top: Number.isFinite(Number(recoveredPanelState.top)) ? Number(recoveredPanelState.top) : 12,
+      };
+    }
     loadedAtStart = queue.length;
     await persistQueue();
     await persistAudit();
@@ -581,12 +541,9 @@
   async function persistQueue() {
     exportDirty = true;
     const snapshot = JSON.parse(JSON.stringify(queue));
-    await Promise.all([
-      gmSetValueSafe(QUEUE_KEY, snapshot),
-      gmSetValueSafe(QUEUE_BACKUP_KEY, snapshot),
-    ]);
-    writeLocalArray(QUEUE_KEY, snapshot);
-    writeLocalArray(QUEUE_BACKUP_KEY, snapshot);
+    await Promise.all([gmSetValueSafe(QUEUE_KEY, snapshot), gmSetValueSafe(QUEUE_BACKUP_KEY, snapshot)]);
+    writeLocalJson(QUEUE_KEY, snapshot);
+    writeLocalJson(QUEUE_BACKUP_KEY, snapshot);
     renderPanel();
   }
 
@@ -594,19 +551,22 @@
     audit = audit.slice(-500);
     exportDirty = true;
     const snapshot = JSON.parse(JSON.stringify(audit));
-    await Promise.all([
-      gmSetValueSafe(AUDIT_KEY, snapshot),
-      gmSetValueSafe(AUDIT_BACKUP_KEY, snapshot),
-    ]);
-    writeLocalArray(AUDIT_KEY, snapshot);
-    writeLocalArray(AUDIT_BACKUP_KEY, snapshot);
+    await Promise.all([gmSetValueSafe(AUDIT_KEY, snapshot), gmSetValueSafe(AUDIT_BACKUP_KEY, snapshot)]);
+    writeLocalJson(AUDIT_KEY, snapshot);
+    writeLocalJson(AUDIT_BACKUP_KEY, snapshot);
     renderPanel();
   }
 
-  function shortLabel(value, maxLength = 115) {
+  async function persistPanelState() {
+    const snapshot = { minimized: panelState.minimized, left: panelState.left, top: panelState.top };
+    writeLocalJson(PANEL_STATE_KEY, snapshot);
+    await gmSetValueSafe(PANEL_STATE_KEY, snapshot);
+  }
+
+  const shortLabel = (value, maxLength = 115) => {
     const text = normalizeWhitespace(value) || 'pergunta não identificada';
     return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
-  }
+  };
 
   function setMessage(message, state = '') {
     const target = panel?.querySelector?.('[data-role="message"]');
@@ -617,10 +577,7 @@
 
   async function recordAudit(status, trigger, card, detail = '') {
     const entry = {
-      at: now(),
-      status,
-      trigger,
-      detail,
+      at: now(), status, trigger, detail,
       id: card?.id || '',
       topic: normalizeWhitespace(card?.topic?.text),
       question: normalizeWhitespace(card?.question?.text),
@@ -629,33 +586,29 @@
       url: scrubSensitiveUrl(pageWindow.location?.href || ''),
     };
     audit.push(entry);
-    audit = audit.slice(-500);
     if (Object.prototype.hasOwnProperty.call(sessionStats, status)) sessionStats[status] += 1;
     await persistAudit();
     return entry;
   }
 
   function summarizeLastFailure(events = audit) {
-    const failures = events.filter((entry) => entry?.status === 'failed');
-    const last = failures.at(-1);
+    const last = events.filter((entry) => entry?.status === 'failed').at(-1);
     if (!last) return { exists: false, recovered: false, text: 'Nenhuma falha registrada.' };
     const recovered = events.some((entry) => {
       if (entry?.status !== 'added') return false;
       if (last.id && entry.id === last.id) return true;
       return last.question && entry.question === last.question && String(entry.at || '') > String(last.at || '');
     });
-    const label = shortLabel(last.question || last.topic || 'pergunta não identificada', 150);
     return {
       exists: true,
       recovered,
-      text: `Última falha: ${label} — ${last.detail || 'motivo não registrado'}${recovered ? ' — capturada depois.' : ' — ainda sem captura posterior confirmada.'}`,
+      text: `Última falha: ${shortLabel(last.question || last.topic || 'pergunta não identificada', 150)} — ${last.detail || 'motivo não registrado'}${recovered ? ' — capturada depois.' : ' — ainda sem captura posterior confirmada.'}`,
     };
   }
 
   async function commitCard(card, trigger) {
     const validation = validateCard(card);
     if (!validation.valid) return { status: 'not-ready', card: null, reasons: validation.reasons };
-
     const copy = JSON.parse(JSON.stringify(card));
     copy.trigger = trigger;
     copy.capturedAt = now();
@@ -665,7 +618,6 @@
       setMessage(`DUPLICADO — ${shortLabel(copy.question.text)}`, 'duplicate');
       return { status: 'duplicate', card: duplicate, reasons: [] };
     }
-
     queue.push(copy);
     await persistQueue();
     await recordAudit('added', trigger, copy, 'adicionado à fila antes de avançar');
@@ -681,19 +633,16 @@
     const card = extractCard(doc);
     const result = await commitCard(card, trigger);
     if (result.status !== 'not-ready') return result;
-    const question = shortLabel(findQuestionElement(doc)?.textContent);
     const detail = result.reasons.join(', ') || 'card não identificado';
     await recordAudit('failed', trigger, card, detail);
-    setMessage(`FALHOU — ${question} — ${detail}`, 'failed');
+    setMessage(`FALHOU — ${shortLabel(findQuestionElement(doc)?.textContent)} — ${detail}`, 'failed');
     return { status: 'failed', card: null, reasons: result.reasons };
   }
 
   function triggerForButton(element) {
     const text = normalizeText([
-      element?.textContent,
-      element?.innerText,
-      element?.getAttribute?.('aria-label'),
-      element?.getAttribute?.('title'),
+      element?.textContent, element?.innerText,
+      element?.getAttribute?.('aria-label'), element?.getAttribute?.('title'),
     ].filter(Boolean).join(' '));
     if (text.includes('acertei')) return null;
     if (text.includes('errei')) return 'Errei';
@@ -731,8 +680,7 @@
       .sort((first, second) => {
         const firstMetrics = visibilityMetrics(first);
         const secondMetrics = visibilityMetrics(second);
-        return (secondMetrics.ratio - firstMetrics.ratio)
-          || (firstMetrics.centerDistance - secondMetrics.centerDistance);
+        return (secondMetrics.ratio - firstMetrics.ratio) || (firstMetrics.centerDistance - secondMetrics.centerDistance);
       })[0] || null;
   }
 
@@ -767,8 +715,7 @@
 
   function nativeButtonClick(trigger, doc, preferredButton = null) {
     const button = preferredButton && preferredButton.isConnected && isVisible(preferredButton)
-      ? preferredButton
-      : findRatingButton(trigger, doc);
+      ? preferredButton : findRatingButton(trigger, doc);
     if (!button) return false;
     nativeReplayUntil = Date.now() + 1800;
     button.focus?.({ preventScroll: true });
@@ -780,17 +727,12 @@
     const button = findRatingButton(trigger, doc);
     if (!button) return false;
     nativeReplayUntil = Date.now() + 1800;
-    button.focus?.({ preventScroll: true });
     const rect = button.getBoundingClientRect?.() || { left: 0, top: 0, width: 1, height: 1 };
     const init = {
-      bubbles: true,
-      cancelable: true,
-      composed: true,
-      view: pageWindow,
+      bubbles: true, cancelable: true, composed: true, view: pageWindow,
       clientX: Number(rect.left || 0) + Number(rect.width || 1) / 2,
       clientY: Number(rect.top || 0) + Number(rect.height || 1) / 2,
-      button: 0,
-      buttons: 1,
+      button: 0, buttons: 1,
     };
     const PointerCtor = pageWindow.PointerEvent || pageWindow.MouseEvent;
     const MouseCtor = pageWindow.MouseEvent;
@@ -802,9 +744,7 @@
       button.dispatchEvent(new MouseCtor('mousedown', init));
       button.dispatchEvent(new MouseCtor('mouseup', { ...init, buttons: 0 }));
       button.dispatchEvent(new MouseCtor('click', { ...init, buttons: 0 }));
-    } else {
-      button.click();
-    }
+    } else button.click();
     return true;
   }
 
@@ -818,18 +758,13 @@
     const target = doc.activeElement || doc.body || doc;
     ['keydown', 'keyup'].forEach((type) => {
       const event = new KeyboardCtor(type, {
-        key: descriptor.key,
-        code: descriptor.code,
-        bubbles: true,
-        cancelable: true,
-        composed: true,
+        key: descriptor.key, code: descriptor.code,
+        bubbles: true, cancelable: true, composed: true,
       });
       try {
         Object.defineProperty(event, 'keyCode', { get: () => descriptor.keyCode });
         Object.defineProperty(event, 'which', { get: () => descriptor.keyCode });
-      } catch (_error) {
-        // Propriedades opcionais.
-      }
+      } catch (_error) { /* opcional */ }
       target.dispatchEvent(event);
     });
     return true;
@@ -869,7 +804,6 @@
       setMessage('AGUARDE — o card anterior ainda está sendo salvo ou avançado.', 'waiting');
       return ratingTransaction.promise;
     }
-
     const transactionState = { trigger, source, phase: 'starting', promise: null };
     ratingTransaction = transactionState;
     const transaction = (async () => {
@@ -879,7 +813,6 @@
       transactionState.phase = 'capturing';
       renderPanel();
       setMessage(`AGUARDANDO RESPOSTA — ${questionAtStart}`, 'waiting');
-
       const { card, validation } = await waitForValidCard(doc, startedAt);
       if (!validation.valid) {
         const detail = validation.reasons.join(', ') || 'resposta não apareceu';
@@ -887,16 +820,12 @@
         setMessage(`NÃO AVANÇOU — ${questionAtStart} — ${detail}. Mostre a resposta e tente novamente.`, 'failed');
         return { status: 'failed', card: null, reasons: validation.reasons, advanced: false };
       }
-
       const auditTrigger = `${source === 'keyboard' ? 'tecla' : 'botão'} ${trigger}`;
       let result;
       if (pendingAdvance && pendingAdvance.id === card.id) {
         result = { status: 'already-saved', card, reasons: [] };
         setMessage(`JÁ SALVO — tentando avançar novamente: ${shortLabel(card.question.text)}`, 'waiting');
-      } else {
-        result = await commitCard(card, auditTrigger);
-      }
-
+      } else result = await commitCard(card, auditTrigger);
       if (!['added', 'duplicate', 'already-saved'].includes(result.status)) return result;
       transactionState.phase = 'advancing';
       renderPanel();
@@ -911,7 +840,6 @@
       }
       return { ...result, advanced, advanceMethod: method };
     })();
-
     transactionState.promise = transaction;
     transaction.finally(() => {
       ratingTransaction = null;
@@ -923,11 +851,8 @@
   function isEditableTarget(target) {
     if (!target) return false;
     const tag = String(target.tagName || '').toLowerCase();
-    return tag === 'input'
-      || tag === 'textarea'
-      || tag === 'select'
-      || Boolean(target.isContentEditable)
-      || Boolean(target.closest?.('[contenteditable="true"]'));
+    return tag === 'input' || tag === 'textarea' || tag === 'select'
+      || Boolean(target.isContentEditable) || Boolean(target.closest?.('[contenteditable="true"]'));
   }
 
   function keyTriggerForEvent(event) {
@@ -947,7 +872,6 @@
   function ensureGlobalListeners(doc = documentRef) {
     if (globalListenersInstalled) return;
     globalListenersInstalled = true;
-
     const keyboardHandler = (event) => {
       if (pageMode() !== 'test' || Date.now() < nativeReplayUntil) return;
       const trigger = keyTriggerForEvent(event);
@@ -957,7 +881,6 @@
     };
     pageWindow.addEventListener?.('keydown', keyboardHandler, true);
     pageWindow.addEventListener?.('keyup', keyboardHandler, true);
-
     doc.addEventListener('click', (event) => {
       if (pageMode() !== 'test' || Date.now() < nativeReplayUntil) return;
       const path = event.composedPath?.() || [event.target];
@@ -980,20 +903,14 @@
 
   function deckNameForCard(card) {
     const raw = normalizeWhitespace(card?.topic?.text || card?.deck?.text || FALLBACK_DECK)
-      .replace(/::+/g, ' — ')
-      .replace(/[\t\r\n]+/g, ' ')
-      .trim();
+      .replace(/::+/g, ' — ').replace(/[\t\r\n]+/g, ' ').trim();
     return raw.slice(0, 100) || FALLBACK_DECK;
   }
 
   function buildTsvFromQueue(cards, doc = documentRef) {
     const headers = [
-      '#separator:Tab',
-      '#html:true',
-      '#tags:osler',
-      '#columns:Frente\tVerso\tTags\tBaralho',
-      '#tags column:3',
-      '#deck column:4',
+      '#separator:Tab', '#html:true', '#tags:osler',
+      '#columns:Frente\tVerso\tTags\tBaralho', '#tags column:3', '#deck column:4',
     ];
     const rows = cards.filter((card) => validateCard(card).valid).map((card) => {
       const question = prepareHtmlForAnki(card.question.html || escapeHtml(card.question.text), doc);
@@ -1009,24 +926,16 @@
 
   function buildAuditPayload() {
     return `${JSON.stringify({
-      version: VERSION,
-      exportedAt: now(),
-      loadedAtStart,
-      queueSize: queue.length,
-      sessionStats,
-      pendingAdvance,
-      lastFailure: summarizeLastFailure(audit),
-      events: audit,
+      version: VERSION, exportedAt: now(), loadedAtStart,
+      queueSize: queue.length, sessionStats, pendingAdvance,
+      lastFailure: summarizeLastFailure(audit), events: audit,
     }, null, 2)}\n`;
   }
 
   function buildBackupPayload() {
     return JSON.stringify({
-      format: 'osler-anki-bridge-backup',
-      version: VERSION,
-      exportedAt: now(),
-      queue,
-      audit,
+      format: 'osler-anki-bridge-backup', version: VERSION,
+      exportedAt: now(), queue, audit,
     }, null, 2);
   }
 
@@ -1048,12 +957,10 @@
     lastExport.backup = buildBackupPayload();
     lastExport.tsvName = `osler-anki-${timestamp}.tsv`;
     lastExport.logName = `osler-anki-diagnostico-${timestamp}.json`;
-
     revokeExportUrl('tsv');
     revokeExportUrl('log');
     exportUrls.tsv = makeObjectUrl(lastExport.tsv, 'text/tab-separated-values;charset=utf-8');
     exportUrls.log = makeObjectUrl(lastExport.log, 'application/json;charset=utf-8');
-
     const tsvDownload = panel.querySelector('[data-role="tsv-download"]');
     const tsvOpen = panel.querySelector('[data-role="tsv-open"]');
     const logDownload = panel.querySelector('[data-role="log-download"]');
@@ -1090,17 +997,13 @@
         const result = GM_setClipboard(contents, 'text');
         if (result && typeof result.then === 'function') await result;
         copied = true;
-      } catch (_error) {
-        copied = false;
-      }
+      } catch (_error) { copied = false; }
     }
     if (!copied && pageWindow.navigator?.clipboard?.writeText) {
       try {
         await pageWindow.navigator.clipboard.writeText(contents);
         copied = true;
-      } catch (_error) {
-        copied = false;
-      }
+      } catch (_error) { copied = false; }
     }
     setMessage(copied ? `${label} copiado.` : 'Não foi possível copiar automaticamente. Use a caixa de texto abaixo.', copied ? 'added' : 'failed');
     return copied;
@@ -1109,16 +1012,18 @@
   async function downloadWithGm(kind) {
     if (exportDirty || !lastExport[kind]) prepareExports();
     const isTsv = kind === 'tsv';
-    const url = exportUrls[kind];
-    const name = isTsv ? lastExport.tsvName : lastExport.logName;
     if (typeof GM_download !== 'function') {
       setMessage('GM_download indisponível. Use o link de download ou a caixa de texto.', 'failed');
       return false;
     }
     try {
-      const result = GM_download({ url, name, saveAs: false });
+      const result = GM_download({
+        url: exportUrls[kind],
+        name: isTsv ? lastExport.tsvName : lastExport.logName,
+        saveAs: false,
+      });
       if (result && typeof result.then === 'function') await result;
-      setMessage(`Download solicitado pelo Violentmonkey: ${name}.`, 'added');
+      setMessage('Download solicitado pelo Violentmonkey.', 'added');
       return true;
     } catch (_error) {
       setMessage('O download do Violentmonkey falhou. Use o link nativo ou a caixa de texto.', 'failed');
@@ -1128,17 +1033,14 @@
 
   async function importBackup(text) {
     let parsed;
-    try {
-      parsed = JSON.parse(String(text || '').trim());
-    } catch (_error) {
+    try { parsed = JSON.parse(String(text || '').trim()); }
+    catch (_error) {
       setMessage('Backup inválido: o texto não é JSON.', 'failed');
       return { added: 0, total: queue.length };
     }
-    const incomingQueue = Array.isArray(parsed) ? parsed : parsed?.queue;
-    const incomingAudit = Array.isArray(parsed?.audit) ? parsed.audit : [];
     const before = queue.length;
-    queue = mergeCardArrays(queue, parseStoredValue(incomingQueue));
-    audit = mergeAuditArrays(audit, incomingAudit);
+    queue = mergeCardArrays(queue, parseStoredValue(Array.isArray(parsed) ? parsed : parsed?.queue));
+    audit = mergeAuditArrays(audit, Array.isArray(parsed?.audit) ? parsed.audit : []);
     await persistQueue();
     await persistAudit();
     prepareExports();
@@ -1147,37 +1049,107 @@
     return { added, total: queue.length };
   }
 
+  function clampPanelPosition(left, top) {
+    if (!panel) return { left: 12, top: 12 };
+    const rect = panel.getBoundingClientRect();
+    const viewportWidth = Number(pageWindow.innerWidth) || 1280;
+    const viewportHeight = Number(pageWindow.innerHeight) || 720;
+    return {
+      left: Math.max(4, Math.min(Number(left) || 4, Math.max(4, viewportWidth - Math.min(rect.width || 280, viewportWidth - 8) - 4))),
+      top: Math.max(4, Math.min(Number(top) || 4, Math.max(4, viewportHeight - Math.min(rect.height || 44, viewportHeight - 8) - 4))),
+    };
+  }
+
+  function applyPanelState() {
+    if (!panel) return;
+    const body = panel.querySelector('[data-role="panel-body"]');
+    const toggle = panel.querySelector('[data-action="toggle-panel"]');
+    const title = panel.querySelector('[data-role="panel-title"]');
+    if (body) body.hidden = Boolean(panelState.minimized);
+    if (toggle) {
+      toggle.textContent = panelState.minimized ? '+' : '−';
+      toggle.title = panelState.minimized ? 'Abrir painel' : 'Minimizar painel';
+    }
+    if (title) title.textContent = panelState.minimized
+      ? `Osler Anki Bridge ${VERSION} · ${queue.length} cards`
+      : `Osler Anki Bridge — ${VERSION}`;
+    panel.style.maxHeight = panelState.minimized ? '48px' : '80vh';
+    panel.style.overflow = panelState.minimized ? 'hidden' : 'auto';
+    const defaultLeft = Math.max(4, (Number(pageWindow.innerWidth) || 1280) - Math.min(440, (Number(pageWindow.innerWidth) || 1280) - 16) - 12);
+    const clamped = clampPanelPosition(panelState.left ?? defaultLeft, panelState.top ?? 12);
+    panelState.left = clamped.left;
+    panelState.top = clamped.top;
+    panel.style.left = `${clamped.left}px`;
+    panel.style.top = `${clamped.top}px`;
+    panel.style.right = 'auto';
+  }
+
+  function installPanelDragging() {
+    const handle = panel?.querySelector?.('[data-role="drag-handle"]');
+    if (!handle) return;
+    let drag = null;
+    handle.addEventListener('pointerdown', (event) => {
+      if (event.target?.closest?.('button')) return;
+      const rect = panel.getBoundingClientRect();
+      drag = {
+        pointerId: event.pointerId,
+        offsetX: event.clientX - rect.left,
+        offsetY: event.clientY - rect.top,
+      };
+      handle.setPointerCapture?.(event.pointerId);
+      event.preventDefault();
+    });
+    handle.addEventListener('pointermove', (event) => {
+      if (!drag || event.pointerId !== drag.pointerId) return;
+      const next = clampPanelPosition(event.clientX - drag.offsetX, event.clientY - drag.offsetY);
+      panelState.left = next.left;
+      panelState.top = next.top;
+      panel.style.left = `${next.left}px`;
+      panel.style.top = `${next.top}px`;
+      event.preventDefault();
+    });
+    const finish = (event) => {
+      if (!drag || (event.pointerId != null && event.pointerId !== drag.pointerId)) return;
+      handle.releasePointerCapture?.(drag.pointerId);
+      drag = null;
+      persistPanelState();
+    };
+    handle.addEventListener('pointerup', finish);
+    handle.addEventListener('pointercancel', finish);
+    pageWindow.addEventListener?.('resize', () => {
+      applyPanelState();
+      persistPanelState();
+    });
+  }
+
   function renderPanel() {
     if (!panel) return;
     const mode = pageMode();
-    const status = panel.querySelector('[data-role="status"]');
-    const session = panel.querySelector('[data-role="session"]');
-    const storage = panel.querySelector('[data-role="storage"]');
-    const modeLine = panel.querySelector('[data-role="mode"]');
-    const failure = panel.querySelector('[data-role="failure"]');
-    const exportStatus = panel.querySelector('[data-role="export-status"]');
-    if (status) status.textContent = `${queue.length} card(s) no total`;
-    if (session) session.textContent = `${loadedAtStart} carregados anteriormente · ${sessionStats.added} adicionados nesta sessão · ${sessionStats.duplicate} duplicados · ${sessionStats.failed} falhas`;
-    if (storage) storage.textContent = 'Fila redundante: Violentmonkey + armazenamento da Osler.';
-    if (failure) failure.textContent = summarizeLastFailure(audit).text;
-    if (exportStatus) exportStatus.textContent = exportDirty
+    const set = (role, text) => {
+      const target = panel.querySelector(`[data-role="${role}"]`);
+      if (target) target.textContent = text;
+    };
+    set('status', `${queue.length} card(s) no total`);
+    set('session', `${loadedAtStart} carregados anteriormente · ${sessionStats.added} adicionados nesta sessão · ${sessionStats.duplicate} duplicados · ${sessionStats.failed} falhas`);
+    set('storage', 'Fila redundante: Violentmonkey + armazenamento da Osler.');
+    set('failure', summarizeLastFailure(audit).text);
+    set('export-status', exportDirty
       ? `Exportação desatualizada: ${exportPreparedCount} de ${queue.length} cards preparados.`
-      : `Exportação pronta: ${exportPreparedCount} cards.`;
-    if (modeLine) {
-      modeLine.textContent = mode === 'test'
-        ? ratingTransaction
-          ? ratingTransaction.phase === 'advancing'
-            ? `Card salvo; confirmando avanço como ${ratingTransaction.trigger}…`
-            : `Aguardando e salvando antes de avançar: ${ratingTransaction.trigger}…`
-          : pendingAdvance
-            ? `Card já salvo, mas ainda na tela. Pressione ${pendingAdvance.trigger === 'Errei' ? '1' : '2'} para tentar avançar novamente.`
-            : 'Espaço mostra · 1 Errei · 2 Difícil. O card é salvo antes do avanço.'
-        : mode === 'report'
-          ? 'Modo leve de exportação: captura desligada nesta tela.'
-          : 'Modo leve: abra um teste para ativar a captura.';
-    }
+      : `Exportação pronta: ${exportPreparedCount} cards.`);
+    set('mode', mode === 'test'
+      ? ratingTransaction
+        ? ratingTransaction.phase === 'advancing'
+          ? `Card salvo; confirmando avanço como ${ratingTransaction.trigger}…`
+          : `Aguardando e salvando antes de avançar: ${ratingTransaction.trigger}…`
+        : pendingAdvance
+          ? `Card já salvo, mas ainda na tela. Pressione ${pendingAdvance.trigger === 'Errei' ? '1' : '2'} para tentar avançar novamente.`
+          : 'Espaço mostra · 1 Errei · 2 Difícil. O card é salvo antes do avanço.'
+      : mode === 'report'
+        ? 'Modo leve de exportação: captura desligada nesta tela.'
+        : 'Modo leve: abra um teste para ativar a captura.');
     const captureButton = panel.querySelector('[data-action="capture"]');
     if (captureButton) captureButton.disabled = mode !== 'test' || Boolean(ratingTransaction);
+    applyPanelState();
   }
 
   function syncPageMode() {
@@ -1203,49 +1175,65 @@
 
   async function install(doc = documentRef) {
     if (!doc?.body || doc.getElementById(PANEL_ID)) return;
-    ['osler-anki-bridge-v042', 'osler-anki-bridge-v043', 'osler-anki-bridge-v044', 'osler-anki-bridge-v045', 'osler-anki-bridge-v046', 'osler-anki-bridge-v047', 'osler-anki-bridge-v048'].forEach((id) => {
+    ['osler-anki-bridge-v042', 'osler-anki-bridge-v043', 'osler-anki-bridge-v044', 'osler-anki-bridge-v045', 'osler-anki-bridge-v046', 'osler-anki-bridge-v047', 'osler-anki-bridge-v048', 'osler-anki-bridge-v049'].forEach((id) => {
       doc.getElementById(id)?.remove?.();
     });
-
     await loadState();
     panel = doc.createElement('section');
     panel.id = PANEL_ID;
     panel.innerHTML = `
-      <strong>Osler Anki Bridge — ${VERSION}</strong>
-      <p data-role="status"></p>
-      <div data-role="session" style="margin-bottom:4px"></div>
-      <div data-role="storage" style="margin-bottom:6px"></div>
-      <button type="button" data-action="capture">Adicionar card atual</button>
-      <button type="button" data-action="prepare">Preparar exportação</button>
-      <div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px">
-        <a data-role="tsv-download" href="#">Baixar TSV (link)</a>
-        <a data-role="tsv-open" href="#" target="_blank">Abrir TSV</a>
-        <a data-role="log-download" href="#">Baixar log (link)</a>
+      <div data-role="drag-handle" style="display:flex;align-items:center;gap:8px;cursor:move;touch-action:none;user-select:none;padding:2px 0 6px">
+        <strong data-role="panel-title" style="flex:1"></strong>
+        <button type="button" data-action="reset-panel" title="Voltar ao canto superior direito" style="min-width:28px">↗</button>
+        <button type="button" data-action="toggle-panel" title="Abrir ou minimizar" style="min-width:28px">+</button>
       </div>
-      <div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:4px">
-        <button type="button" data-action="gm-tsv">Baixar TSV via Violentmonkey</button>
-        <button type="button" data-action="gm-log">Baixar log via Violentmonkey</button>
-        <button type="button" data-action="copy-tsv">Copiar TSV</button>
-        <button type="button" data-action="copy-log">Copiar log</button>
+      <div data-role="panel-body">
+        <p data-role="status"></p>
+        <div data-role="session" style="margin-bottom:4px"></div>
+        <div data-role="storage" style="margin-bottom:6px"></div>
+        <button type="button" data-action="capture">Adicionar card atual</button>
+        <button type="button" data-action="prepare">Preparar exportação</button>
+        <div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px">
+          <a data-role="tsv-download" href="#">Baixar TSV (link)</a>
+          <a data-role="tsv-open" href="#" target="_blank">Abrir TSV</a>
+          <a data-role="log-download" href="#">Baixar log (link)</a>
+        </div>
+        <div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:4px">
+          <button type="button" data-action="gm-tsv">Baixar TSV via Violentmonkey</button>
+          <button type="button" data-action="gm-log">Baixar log via Violentmonkey</button>
+          <button type="button" data-action="copy-tsv">Copiar TSV</button>
+          <button type="button" data-action="copy-log">Copiar log</button>
+        </div>
+        <div data-role="export-status" style="margin-top:6px"></div>
+        <div data-role="mode" style="margin-top:6px"></div>
+        <div data-role="failure" style="margin-top:6px"></div>
+        <div data-role="message" style="margin-top:5px;max-width:440px;overflow-wrap:anywhere"></div>
+        <details style="margin-top:7px">
+          <summary>Conteúdo de recuperação</summary>
+          <label>TSV bruto</label>
+          <textarea data-role="tsv-text" rows="5" style="width:100%;box-sizing:border-box"></textarea>
+          <label>Log bruto</label>
+          <textarea data-role="log-text" rows="5" style="width:100%;box-sizing:border-box"></textarea>
+          <label>Backup completo da fila</label>
+          <textarea data-role="backup-text" rows="6" style="width:100%;box-sizing:border-box"></textarea>
+          <button type="button" data-action="import-backup">Importar backup colado</button>
+        </details>
       </div>
-      <div data-role="export-status" style="margin-top:6px"></div>
-      <div data-role="mode" style="margin-top:6px"></div>
-      <div data-role="failure" style="margin-top:6px"></div>
-      <div data-role="message" style="margin-top:5px;max-width:440px;overflow-wrap:anywhere"></div>
-      <details style="margin-top:7px">
-        <summary>Conteúdo de recuperação</summary>
-        <label>TSV bruto</label>
-        <textarea data-role="tsv-text" rows="5" style="width:100%;box-sizing:border-box"></textarea>
-        <label>Log bruto</label>
-        <textarea data-role="log-text" rows="5" style="width:100%;box-sizing:border-box"></textarea>
-        <label>Backup completo da fila</label>
-        <textarea data-role="backup-text" rows="6" style="width:100%;box-sizing:border-box"></textarea>
-        <button type="button" data-action="import-backup">Importar backup colado</button>
-      </details>
     `;
-    panel.style.cssText = 'position:fixed;right:12px;top:12px;z-index:2147483647;background:#fff;color:#111;border:1px solid #999;border-radius:10px;padding:10px;font:12px system-ui;max-width:460px;max-height:80vh;overflow:auto';
+    panel.style.cssText = 'position:fixed;z-index:2147483647;background:#fff;color:#111;border:1px solid #999;border-radius:10px;padding:8px 10px;font:12px system-ui;width:min(440px,calc(100vw - 16px));box-sizing:border-box;box-shadow:0 4px 18px rgba(0,0,0,.35)';
     doc.body.appendChild(panel);
 
+    panel.querySelector('[data-action="toggle-panel"]').addEventListener('click', () => {
+      panelState.minimized = !panelState.minimized;
+      applyPanelState();
+      persistPanelState();
+    });
+    panel.querySelector('[data-action="reset-panel"]').addEventListener('click', () => {
+      panelState.left = null;
+      panelState.top = 12;
+      applyPanelState();
+      persistPanelState();
+    });
     panel.querySelector('[data-action="capture"]').addEventListener('click', () => capture('captura manual', doc));
     panel.querySelector('[data-action="prepare"]').addEventListener('click', prepareExports);
     panel.querySelector('[data-action="gm-tsv"]').addEventListener('click', () => downloadWithGm('tsv'));
@@ -1262,6 +1250,7 @@
       importBackup(panel.querySelector('[data-role="backup-text"]')?.value || '');
     });
 
+    installPanelDragging();
     ensureGlobalListeners(doc);
     installRouteWatcher();
     prepareExports();
@@ -1269,33 +1258,14 @@
   }
 
   const api = {
-    advanceAndConfirm,
-    advanceSnapshot,
-    buildTsvFromQueue,
-    capture,
-    deckNameForCard,
-    extractCard,
-    extractResponse,
-    findQuestionElement,
-    hasAdvanced,
-    importBackup,
-    keyTriggerForEvent,
-    mergeCardArrays,
-    pageMode,
-    parseStoredValue,
-    sanitizeHtml,
-    stableHash,
-    summarizeLastFailure,
-    validateCard,
-    visibilityMetrics,
+    advanceAndConfirm, advanceSnapshot, buildTsvFromQueue, capture,
+    clampPanelPosition, deckNameForCard, extractCard, extractResponse,
+    findQuestionElement, hasAdvanced, importBackup, keyTriggerForEvent,
+    mergeCardArrays, pageMode, parseStoredValue, sanitizeHtml,
+    stableHash, summarizeLastFailure, validateCard, visibilityMetrics,
   };
 
-  pageWindow.OslerAnkiBridgeV049 = api;
-  if (typeof module !== 'undefined' && module.exports) {
-    module.exports = api;
-  } else {
-    install().catch((error) => {
-      console.error('[Osler Anki Bridge 0.4.9] Falha na instalação:', error);
-    });
-  }
+  pageWindow.OslerAnkiBridgeV0410 = api;
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+  else install().catch((error) => console.error('[Osler Anki Bridge 0.4.10] Falha na instalação:', error));
 })();
