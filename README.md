@@ -1,42 +1,36 @@
 # Osler Anki Bridge
 
-Userscripts Android-only para capturar cards marcados como **Errei** ou **Difícil** na Osler e exportá-los para o AnkiDroid.
+Userscript Android-only para capturar cards marcados como **Errei** ou **Difícil** na Osler e exportá-los para o AnkiDroid.
 
-## Versão 0.4.12 — sessões rastreadas pelo log
+## Versão 0.5.0 — script unificado
 
-A captura estável permanece no script principal 0.4.10. A camada de sessões 0.4.12 é instalada junto dele e usa o histórico real de capturas do painel principal.
+A captura, a sessão nomeada e a exportação agora ficam no mesmo userscript. Não há mais dependência entre o capturador principal, a camada de sessões e correções separadas.
 
-A correção impede que uma sessão nova herde os cards antigos da fila. Também inclui na sessão um card antigo quando ele é realmente reencontrado e marcado durante o tema atual.
+A 0.5.0:
 
-Com ela é possível:
-
-- iniciar uma sessão com um nome, por exemplo `Princípios do SUS`;
-- começar a sessão com zero cards, independentemente do tamanho da fila completa;
-- contabilizar somente eventos `adicionado` ou `duplicado` ocorridos depois do início da sessão;
-- exportar um TSV contendo somente os cards daquela sessão;
-- colocar todos os cards exportados no mesmo baralho, usando o nome da sessão;
-- preservar o assunto original de cada card como tag;
-- reparar automaticamente sessões ativas da 0.4.11 que exibiam toda a fila antiga.
+- preserva a fila e o histórico das versões anteriores;
+- recupera sessões antigas e reinícios acidentais com o mesmo nome;
+- adiciona cada card diretamente à sessão ativa dentro da mesma transação que o salva;
+- inclui também cards duplicados na sessão atual quando forem vistos e marcados novamente;
+- impede Errei/Difícil quando não há sessão ativa;
+- salva antes de avançar e confirma a mudança real do card;
+- evita confundir referências bibliográficas em itálico com a pergunta;
+- exporta somente a sessão escolhida, usando seu nome como baralho;
+- preserva o assunto original como tag;
+- reúne sessão, captura, diagnóstico, backup e exportação em um único painel móvel.
 
 ## Instalação
 
-1. Mantenha instalado o script principal `docs/osler-anki-bridge.user.js` na versão 0.4.10.
-2. Atualize a camada de sessões instalando `docs/osler-anki-sessions-v0412.user.js`.
-3. Feche todas as abas da Osler e abra novamente.
-4. Abra o painel com `+`; o bloco **Sessão de exportação — 0.4.12** aparecerá no início.
+Instale `docs/osler-anki-bridge-v050.user.js` e mantenha somente o script **Osler Anki Bridge 0.5.0** ativado no Violentmonkey. As antigas extensões auxiliares de sessões e correção de perguntas devem ser desativadas.
 
-## Fluxo por tema
+## Fluxo
 
-1. Fora da sessão de flashcards, digite o nome do tema e toque em **Nova sessão**.
-2. Confirme que o contador começa em zero.
-3. Minimize o painel e faça os flashcards normalmente.
-4. Saia da sessão de flashcards.
-5. Abra o painel e confira o número de cards da sessão.
-6. Toque em **Preparar TSV da sessão**.
-7. Use **Baixar TSV da sessão**, **Baixar via Violentmonkey** ou **Copiar TSV**.
-8. Toque em **Encerrar sessão** antes de iniciar outro tema.
-
-A exportação completa e o log continuam disponíveis no painel principal.
+1. Fora dos flashcards, abra o painel e inicie uma sessão nomeada.
+2. Entre nos flashcards e use **Espaço**, **1 Errei** ou **2 Difícil**.
+3. O contador da sessão é atualizado no mesmo momento em que o card é salvo.
+4. Ao terminar, saia dos flashcards.
+5. Prepare e baixe o TSV da sessão.
+6. Encerre a sessão antes de iniciar outro tema.
 
 ## Desenvolvimento
 
