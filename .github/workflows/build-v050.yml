@@ -29,9 +29,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - name: Decode compressed source
+      - name: Assemble plain reviewed source
         run: |
-          cat build/v050/part*.b64 | tr -d '\n\r ' | base64 --decode | gzip --decompress > /tmp/osler-anki-bridge-v050.user.js
+          cat build/v050/plain/part*.js > /tmp/osler-anki-bridge-v050.user.js
           test -s /tmp/osler-anki-bridge-v050.user.js
       - name: Verify unified metadata
         run: |
