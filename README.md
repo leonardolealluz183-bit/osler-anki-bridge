@@ -2,30 +2,32 @@
 
 Userscript Android-only que captura cards marcados como **Errei** ou **Difícil** na Osler, mantém uma fila persistente e exporta tudo de uma vez para importação no AnkiDroid.
 
-## Versão 0.4.7 — Fase 2
+## Versão 0.4.8 — Fase 2
+
+A 0.4.8 mantém o núcleo de captura e avanço confirmado da 0.4.7 e corrige a exportação após a migração para o ambiente isolado do Violentmonkey.
 
 Correções principais:
 
-- mantém os atalhos: **Espaço** mostra a resposta pela Osler, **1** captura Errei e **2** captura Difícil;
-- continua salvando o card antes de permitir o avanço;
-- depois de salvar, confirma que a Osler realmente saiu do card atual;
-- detecta o avanço quando a pergunta muda, o nó do card é substituído, os botões Errei/Difícil desaparecem ou o relatório abre;
-- tenta avançar por clique nativo, sequência de ponteiro e repetição do atalho de teclado;
-- se o card continuar na tela, o próximo `1` ou `2` tenta apenas avançar, sem registrar outra duplicata;
-- migra a fila antiga do `localStorage` para o armazenamento permanente do Violentmonkey usando `GM_getValue` e `GM_setValue`;
-- mantém um espelho local de contingência, log de até 500 eventos e modo leve em `/test/report`;
-- preserva as correções anteriores de clozes distintos, respostas em lista, citações e bloqueio de respostas incompletas.
+- usa `GM_download` para baixar TSV e log pelo próprio Violentmonkey;
+- mantém download por link da página como contingência;
+- adiciona **Abrir TSV**, que abre o arquivo em uma nova aba para salvamento manual pelo Firefox;
+- adiciona **Copiar log**, usando `GM_setClipboard`, para diagnóstico mesmo quando downloads estiverem bloqueados;
+- mostra permanentemente a última falha, sua pergunta, seu motivo e se houve captura posterior confirmada;
+- preserva a fila permanente do Violentmonkey e a migração do armazenamento antigo;
+- continua salvando antes de avançar e confirmando que a Osler mudou de card;
+- continua evitando duplicatas quando o primeiro avanço falha.
 
-O problema que motivou a 0.4.7 apareceu em uma sessão real da 0.4.6: os 100 cards novos foram salvos corretamente, mas houve 66 tentativas duplicadas porque a Osler frequentemente permanecia no mesmo card depois do primeiro salvamento. A nova versão não considera a operação concluída até observar o avanço real.
+O problema que motivou a 0.4.8 apareceu no primeiro teste real da 0.4.7: a captura e a fila permanente funcionaram, mas os botões antigos de download deixaram de responder porque o script agora executava em um contexto isolado com permissões do userscript.
 
 ## Fluxo
 
 1. Pressione **Espaço** para mostrar a resposta.
 2. Pressione **1** para Errei ou **2** para Difícil.
-3. O painel mostra `AGUARDANDO RESPOSTA`, depois `SALVO — avançando` e finalmente `SALVO E AVANÇOU`.
-4. Quando aparecer `SALVO, MAS NÃO AVANÇOU`, pressione a mesma tecla novamente; o card já salvo não será duplicado.
-5. O painel deve informar `Fila permanente do Violentmonkey ativa`.
-6. No relatório final, use **Baixar TSV** ou **Baixar log** no modo leve.
+3. O painel mostra `SALVO E AVANÇOU` quando a operação termina.
+4. A última falha permanece visível no rodapé do painel.
+5. Use **Baixar TSV** normalmente.
+6. Se o Firefox bloquear o download, use **Abrir TSV** e salve pelo menu da nova aba.
+7. Para diagnóstico, use **Baixar log** ou **Copiar log**.
 
 ## Desenvolvimento
 
