@@ -1,6 +1,6 @@
 {
   "name": "osler-anki-bridge",
-  "version": "1.2.2",
+  "version": "1.2.3-dev1",
   "private": true,
   "description": "Exportação completa e validada dos flashcards do modo Consulta da Osler para o AnkiDroid.",
   "scripts": {

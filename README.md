@@ -1,6 +1,6 @@
 # Osler Anki Exporter
 
-## Estado da retomada — v1.2.2-dev1 (12/11/2026)
+## Estado da retomada — v1.2.3-dev1 (12/11/2026)
 
 A exportação pela Consulta ainda **não está validada na Osler real**. No último teste relatado, a tela exibiu 41 cartões e o script gerou 35. A contagem de segurança continua impedindo baixar um TSV incompleto.
 
@@ -12,7 +12,7 @@ Para investigar os cartões ausentes sem perder o conteúdo parcial:
 4. Se a contagem não coincidir, consulte o TSV parcial em **TSV bruto** para inspeção; a opção de download continua bloqueada.
 5. Clique em **Copiar inspeção (JSON)** e compartilhe o resultado para localizar quais blocos foram ignorados ou tiveram falhas de extração.
 
-A inspeção registra trechos de texto dos cartões, contagens, blocos sem cards e possíveis elementos irmãos. Ela só é copiada quando o usuário aperta o botão; não existe envio automático. Os dados copiados devem ser revisados antes de compartilhamento.
+A inspeção registra trechos de texto, contagens, blocos, respostas coloridas e a estrutura de listas agrupadas. Ela só é copiada quando o usuário aperta o botão; não existe envio automático. Os dados copiados devem ser revisados antes de compartilhamento.
 
 Testes automatizados não substituem a validação com o DOM real da Osler. Esta é uma versão de diagnóstico, não a correção definitiva da divergência 35/41.
 
