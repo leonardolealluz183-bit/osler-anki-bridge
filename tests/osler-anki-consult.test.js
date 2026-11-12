@@ -10,7 +10,7 @@ const exporter = require(publishedPath);
 
 test('targets Consulta and loads before SPA navigation', () => {
   assert.match(source, /@name\s+Osler Anki Exporter — Consulta/);
-  assert.match(source, /@version\s+1\.2\.1/);
+  assert.match(source, /@version\s+1\.2\.2-dev1/);
   assert.match(source, /@match\s+https:\/\/oslermedicina\.com\.br\/\*/);
   assert.match(source, /@run-at\s+document-start/);
   assert.match(source, /pushState/);
@@ -55,4 +55,15 @@ test('never disables the whole panel and keeps diagnostic recovery available', (
 test('stable hashes distinguish different cards', () => {
   assert.equal(exporter.hash('mesmo'), exporter.hash('mesmo'));
   assert.notEqual(exporter.hash('um'), exporter.hash('dois'));
+});
+
+
+test('keeps incomplete TSV export blocked but exposes block-level inspection', () => {
+  assert.equal(exporter.VERSION, '1.2.2-dev1');
+  assert.equal(typeof exporter.diagnostics, 'function');
+  assert.match(source, /data-action="inspect"/);
+  assert.match(source, /unparsedBlocks/);
+  assert.match(source, /sameLevelCandidates/);
+  assert.match(source, /P\.querySelector\('\[data-role="raw"\]'\)\.value=tsv\(z\.cards/);
+  assert.match(source, /Exportação bloqueada/);
 });
