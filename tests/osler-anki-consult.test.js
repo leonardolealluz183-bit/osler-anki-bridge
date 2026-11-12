@@ -10,7 +10,7 @@ const exporter = require(publishedPath);
 
 test('targets Consulta and loads before SPA navigation', () => {
   assert.match(source, /@name\s+Osler Anki Exporter — Consulta/);
-  assert.match(source, /@version\s+1\.2\.2-dev1/);
+  assert.match(source, /@version\s+1\.2\.2/);
   assert.match(source, /@match\s+https:\/\/oslermedicina\.com\.br\/\*/);
   assert.match(source, /@run-at\s+document-start/);
   assert.match(source, /pushState/);
@@ -42,7 +42,23 @@ test('contains two independent card-discovery strategies and count validation', 
   assert.match(source, /function frame\(/);
   assert.match(source, /mostrando\\s\+\(\\d\+\)/);
   assert.match(source, /Exportação bloqueada/);
-  assert.match(source, /cards\.length===c\.shown/);
+  assert.equal(exporter.countsComplete(20, { shown: 20, total: 41 }, 20), false);
+  assert.equal(exporter.countsComplete(41, { shown: 41, total: 41 }, 20), true);
+  assert.equal(exporter.countsComplete(40, { shown: 41, total: 41 }, 20), false);
+  assert.equal(exporter.countsComplete(4, { shown: null, total: null }, 2), false);
+  assert.equal(exporter.countsComplete(0, { shown: null, total: null }, 0), false);
+});
+
+test('removes dangerous and sensitive URLs before exporting HTML', () => {
+  assert.equal(exporter.sanitizeUrl('javascript:alert(1)'), '');
+  assert.equal(exporter.sanitizeUrl('data:text/html,unsafe'), '');
+  assert.equal(
+    exporter.sanitizeUrl('https://cdn.example/image.png?token=secret&size=large'),
+    'https://cdn.example/image.png?size=large',
+  );
+  assert.equal(exporter.sanitizeUrl('/image.png?signature=secret&size=large'), '/image.png?size=large');
+  assert.match(source, /n\.startsWith\('on'\)/);
+  assert.match(source, /srcdoc/);
 });
 
 test('never disables the whole panel and keeps diagnostic recovery available', () => {
@@ -59,7 +75,7 @@ test('stable hashes distinguish different cards', () => {
 
 
 test('keeps incomplete TSV export blocked but exposes block-level inspection', () => {
-  assert.equal(exporter.VERSION, '1.2.2-dev1');
+  assert.equal(exporter.VERSION, '1.2.2');
   assert.equal(typeof exporter.diagnostics, 'function');
   assert.match(source, /data-action="inspect"/);
   assert.match(source, /unparsedBlocks/);

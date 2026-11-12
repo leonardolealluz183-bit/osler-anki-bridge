@@ -18,11 +18,11 @@ Testes automatizados não substituem a validação com o DOM real da Osler. Esta
 
 Userscript Android-first para exportar em lote os flashcards do modo **Consulta** da Osler para o AnkiDroid.
 
-## Versão 1.2.0 — Consulta
+## Versão 1.2.2 — Consulta
 
 O fluxo antigo de captura durante a revisão foi abandonado. A versão atual não intercepta **Errei**, **Difícil**, teclado, avanço de card ou sessões persistentes.
 
-A 1.2.0:
+A 1.2.2:
 
 - é carregada antes da navegação interna e aparece automaticamente ao entrar na **Consulta**;
 - reconhece os blocos tanto pela moldura laranja quanto pelo botão de opções de cada card;
@@ -34,13 +34,14 @@ A 1.2.0:
 - remove referências bibliográficas finais de forma conservadora;
 - deduplica pelo conteúdo;
 - exporta tudo para um único baralho escolhido pelo usuário;
-- bloqueia o download quando a quantidade de cards gerados não coincide com a quantidade exibida pela Osler.
+- bloqueia o download até `Mostrando X de Y` chegar ao total e a quantidade de cards gerados coincidir com esse total;
+- remove scripts, eventos HTML, URLs perigosas e parâmetros sensíveis como `token`, `signature` e `jwt` do conteúdo exportado.
 
 A Consulta pode agrupar vários flashcards originais dentro de um único bloco visual. Por isso, a validação usa o número de **cards gerados**, e não exige um bloco DOM para cada flashcard.
 
 ## Instalação
 
-Instale apenas `docs/osler-anki-consult.user.js` e mantenha ativo somente **Osler Anki Exporter — Consulta 1.2.0**.
+Instale apenas `docs/osler-anki-consult.user.js` e mantenha ativo somente **Osler Anki Exporter — Consulta 1.2.2**.
 
 Desative os scripts antigos:
 
@@ -56,7 +57,7 @@ Desative os scripts antigos:
 3. Não recarregue a rota `/consult`; a Osler depende do estado criado pela navegação interna.
 4. No painel **Osler → Anki · Consulta**, informe o nome do baralho.
 5. Toque em **Carregar tudo e gerar TSV**.
-6. O download só será liberado quando o total gerado coincidir com `Mostrando X de Y`.
+6. O download só será liberado quando a Osler mostrar `X de X` e o total gerado também for `X`.
 7. Baixe o TSV e importe-o no AnkiDroid.
 
 ## Validação

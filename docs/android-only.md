@@ -1,22 +1,28 @@
-# Osler Anki Bridge — Fase 2 Android-only
+# Osler Anki Exporter — teste Android
 
-A versão 0.4.2 corrige cards em que pergunta, resposta e explicação aparecem em contêineres diferentes na página da Osler.
+A versão atual exporta em lote os flashcards do modo **Consulta** para um arquivo TSV importável no AnkiDroid. Ela não captura mais os cliques em **Errei**, **Difícil** ou **Acertei** e não instala um aplicativo Android.
 
-## Correção validada
+## Preparação
 
-O TSV de teste não continha o card:
+1. No Firefox Android, instale e habilite o Violentmonkey.
+2. Instale somente `docs/osler-anki-consult.user.js`.
+3. Desative `Osler Anki Bridge`, `Osler Anki Bridge — Sessões`, `Osler Capture Diagnostics` e `Osler Anki Bridge — Correção de perguntas`.
 
-- `Angioedema. Em linhas gerais, qual a fisiopatologia?`
-- resposta: `Perda da integridade vascular.`
+## Fluxo de teste
 
-A 0.4.2 procura a pergunta em um contêiner ancestral comum, extrai os blocos que ficam entre pergunta e explicação e mantém um snapshot recente do card revelado antes da troca de tela.
+1. Entre na Osler e abra a tela **Flashcards**.
+2. Escolha um tema e abra o modo **Consulta** pela navegação normal da Osler; não recarregue diretamente a rota `/consult`.
+3. No painel **Osler → Anki · Consulta 1.2.2**, informe o nome do baralho.
+4. Toque em **Carregar tudo e gerar TSV**.
+5. Confirme que o indicador da Osler chegou a `X de X` e que o painel preparou exatamente `X` cards.
+6. Baixe o TSV e importe-o no AnkiDroid como arquivo separado por tabulação, com HTML habilitado.
+7. Verifique perguntas, respostas, explicações, lacunas, listas, tabelas, imagens, tags, baralho e duplicatas.
 
-## Fluxo
+## Se a exportação for bloqueada
 
-1. Errei e Difícil adicionam o card à fila persistente.
-2. Acertei não adiciona.
-3. O painel mostra a quantidade na fila.
-4. Se o contador não aumentar em um caso isolado, use **Adicionar card atual** antes de avançar; esse botão é um fallback de segurança.
-5. Baixe o TSV no fim da sessão.
+1. Abra **Diagnóstico** no painel.
+2. Toque em **Copiar diagnóstico**.
+3. Registre também o tema, o texto `Mostrando X de Y`, a versão do Firefox e a versão do Violentmonkey.
+4. Não envie URLs completas que contenham credenciais, tokens ou dados pessoais.
 
-A fila continua em `oslerAnkiBridge.queue.v1` e sobrevive a F5 e ao encerramento da sessão da Osler.
+O teste só estará concluído depois de importar o TSV no AnkiDroid e comparar a quantidade e o conteúdo dos cards com a Consulta original.
