@@ -1,0 +1,61 @@
+name: Build unified v0.5.0
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'build/v050/**'
+      - 'scripts/assemble-v050.js'
+      - '.github/workflows/build-v050.yml'
+  push:
+    branches:
+      - phase-2-android-bridge
+    paths:
+      - 'build/v050/**'
+      - 'scripts/assemble-v050.js'
+      - '.github/workflows/build-v050.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: phase-2-android-bridge
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Assemble plain reviewed source
+        run: |
+          cat build/v050/plain/part*.js > /tmp/osler-anki-bridge-v050.user.js
+          test -s /tmp/osler-anki-bridge-v050.user.js
+      - name: Verify unified metadata
+        run: |
+          grep -F '// @version      0.5.0' /tmp/osler-anki-bridge-v050.user.js
+          grep -F "oslerAnkiBridge.sessions.v3" /tmp/osler-anki-bridge-v050.user.js
+      - name: Publish generated copies
+        run: |
+          cp /tmp/osler-anki-bridge-v050.user.js docs/osler-anki-bridge-v050.user.js
+          cp /tmp/osler-anki-bridge-v050.user.js userscript/osler-anki-bridge-v050.user.js
+      - name: Check published syntax
+        run: node --check docs/osler-anki-bridge-v050.user.js
+      - name: Check source syntax
+        run: node --check userscript/osler-anki-bridge-v050.user.js
+      - name: Compare generated copies
+        run: cmp docs/osler-anki-bridge-v050.user.js userscript/osler-anki-bridge-v050.user.js
+      - name: Commit generated userscript
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add docs/osler-anki-bridge-v050.user.js userscript/osler-anki-bridge-v050.user.js
+          if git diff --cached --quiet; then
+            echo 'Generated files are already current.'
+          else
+            git commit -m 'Build unified Osler Anki Bridge v0.5.0'
+            git pull --rebase origin phase-2-android-bridge
+            git push origin HEAD:phase-2-android-bridge
+          fi

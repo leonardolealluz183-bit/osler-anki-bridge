@@ -1,38 +1,28 @@
-# Osler Anki Bridge — Fase 1 Android-only
+# Osler Anki Exporter — teste Android
 
-A Fase 1 é um userscript de captura e diagnóstico para uso em navegador Android com gerenciador de userscripts. Ela não envia dados para a internet, não chama Android Intent, não integra com AnkiDroid e não inclui aplicativo Android nativo.
+A versão atual exporta em lote os flashcards do modo **Consulta** para um arquivo TSV importável no AnkiDroid. Ela não captura mais os cliques em **Errei**, **Difícil** ou **Acertei** e não instala um aplicativo Android.
 
-## Fluxo da versão 0.3.3
+## Preparação
 
-1. Abra uma sessão de flashcards na Osler com o userscript instalado.
-2. Toque em **Mostrar resposta**.
-3. Ao tocar em **Errei** ou **Difícil**, o script captura o card antes da troca de tela.
-4. **Acertei** não captura.
-5. Use **Copiar JSON** para revisar o resultado.
+1. No Firefox Android, instale e habilite o Violentmonkey.
+2. Instale somente `docs/osler-anki-consult.user.js`.
+3. Desative `Osler Anki Bridge`, `Osler Anki Bridge — Sessões`, `Osler Capture Diagnostics` e `Osler Anki Bridge — Correção de perguntas`.
 
-A captura dos botões usa `pointerdown` e `click`, com supressão da duplicata do mesmo gesto. A detecção aceita textos concatenados, como `Errei7 dias` ou `Difícil12 min`, porque a Osler pode montar o rótulo e o intervalo sem espaço no `textContent`.
+## Fluxo de teste
 
-Na página real da Osler não é necessário calibrar pergunta, assunto, resposta, explicação ou botões. A extração automática usa a estrutura estável do card, não as classes dinâmicas geradas pelo layout.
+1. Entre na Osler e abra a tela **Flashcards**.
+2. Escolha um tema e abra o modo **Consulta** pela navegação normal da Osler; não recarregue diretamente a rota `/consult`.
+3. No painel **Osler → Anki · Consulta 1.2.2**, informe o nome do baralho.
+4. Toque em **Carregar tudo e gerar TSV**.
+5. Confirme que o indicador da Osler chegou a `X de X` e que o painel preparou exatamente `X` cards.
+6. Baixe o TSV e importe-o no AnkiDroid como arquivo separado por tabulação, com HTML habilitado.
+7. Verifique perguntas, respostas, explicações, lacunas, listas, tabelas, imagens, tags, baralho e duplicatas.
 
-## Estrutura capturada
+## Se a exportação for bloqueada
 
-- `topic` e `deck`: primeiro `<strong>` da pergunta, sem pontuação final.
-- `question.text` e `question.html`: pergunta com cada `.cloze-answer` substituído por `[...]`.
-- `question.revealedText` e `question.revealedHtml`: versão revelada.
-- `answer`: usa os elementos `.cloze-answer` quando existem.
-- Em cards sem cloze, `answer` é obtido do bloco exibido entre a pergunta e `div.osler-card-explanation`, incluindo itens de lista.
-- `explanation`: todo o bloco `div.osler-card-explanation`, incluindo todos os parágrafos.
+1. Abra **Diagnóstico** no painel.
+2. Toque em **Copiar diagnóstico**.
+3. Registre também o tema, o texto `Mostrando X de Y`, a versão do Firefox e a versão do Violentmonkey.
+4. Não envie URLs completas que contenham credenciais, tokens ou dados pessoais.
 
-O campo `answer.source` informa se a origem foi `cloze`, `intermediate-block` ou `manual-fallback`.
-
-## Privacidade do JSON
-
-O sanitizador remove scripts, atributos perigosos e parâmetros sensíveis de URLs, incluindo `token`, `access_token`, `authorization`, `signature`, `sig`, `key` e `jwt`. A URL relativa da imagem permanece no HTML, mas o token temporário não deve aparecer no JSON copiado.
-
-## Fallback e limitações
-
-- A calibração manual permanece em um painel recolhível apenas para diagnóstico de páginas não reconhecidas.
-- **Limpar calibração** remove a configuração manual salva na chave v2.
-- Capturas duplicadas são ignoradas por identificador estável.
-- Nenhum dado é transmitido pela internet.
-- A Fase 2 e a integração com AnkiDroid permanecem fora do escopo.
+O teste só estará concluído depois de importar o TSV no AnkiDroid e comparar a quantidade e o conteúdo dos cards com a Consulta original.
