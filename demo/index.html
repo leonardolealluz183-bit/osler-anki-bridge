@@ -1,32 +1,100 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="pt-BR">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Osler Capture Diagnostics — página simulada</title>
+    <title>Osler Anki Bridge — demonstração</title>
     <style>
-      body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 840px; line-height: 1.55; }
-      main { border: 1px solid #ddd; border-radius: 16px; padding: 1.5rem; }
-      .answer, .explanation { background: #f6f8fa; border-radius: 12px; padding: 1rem; }
-      .actions { display: flex; gap: .75rem; margin-top: 1rem; }
+      :root { color-scheme: light; }
+      body { font-family: system-ui, sans-serif; margin: 0 auto; max-width: 820px; padding: 1.5rem; line-height: 1.55; background: #f3f5f9; color: #1c2430; }
+      header.demo { display: flex; justify-content: space-between; align-items: center; gap: 1rem; margin-bottom: 1rem; }
+      .progress { font-size: 13px; color: #5b6678; }
+      .tests { display: grid; gap: 1rem; }
+      article { background: #fff; border: 1px solid #dde3ec; border-radius: 14px; padding: 1rem 1.25rem; }
+      .QuietLine-sc-demo { margin: 0 0 .5rem; font-size: 12px; color: #6b7688; }
+      .QuietDeck-sc-demo { color: #2f6feb; }
+      .osler-card-explanation { background: #f6f8fa; border-left: 3px solid #b9c6da; border-radius: 8px; padding: .6rem .9rem; margin-top: .75rem; }
+      .ReferenceText-sc-demo { margin-top: .75rem; font-size: 12px; color: #7a8698; }
+      .cloze-answer { background: #fde68a; border-radius: 4px; padding: 0 3px; }
+      img { max-width: 100%; border-radius: 8px; }
+      .hint { background: #e8f0ff; border: 1px solid #c7d8ff; border-radius: 10px; padding: .75rem 1rem; font-size: 13px; }
     </style>
   </head>
   <body>
-    <main>
-      <p data-osler-deck>Hematologia / Anemias</p>
-      <h1 data-osler-question>Qual achado diferencia anemia ferropriva de talassemia menor?</h1>
-      <section class="answer" data-osler-answer>
-        Na anemia ferropriva espera-se <strong>ferritina baixa</strong> e RDW elevado; na talassemia menor, o RDW tende a ser normal e a contagem de hemácias pode estar preservada ou elevada.
-      </section>
-      <section class="explanation" data-osler-explanation>
-        A calibração deve selecionar pergunta, resposta, explicação, assunto/deck e os botões Errei/Difícil. O botão Acertei permanece sem captura por padrão.
-      </section>
-      <div class="actions">
-        <button type="button" data-osler-wrong>Errei</button>
-        <button type="button" data-osler-hard>Difícil</button>
-        <button type="button" data-osler-correct>Acertei</button>
-      </div>
-    </main>
-    <script src="./osler-anki-bridge.user.js"></script>
+    <header class="demo">
+      <p class="progress">Mostrando 3 de 3</p>
+      <strong>Demonstração — Osler Anki Bridge 0.4.0</strong>
+    </header>
+
+    <p class="hint">
+      Esta página imita a estrutura da consulta do Osler. O painel no canto inferior direito é o userscript
+      rodando. Clique em <strong>Carregar tudo e capturar</strong> e depois em <strong>Baixar TSV cloze</strong>.
+    </p>
+
+    <div class="tests">
+      <article>
+        <header>
+          <p class="QuietLine-sc-demo">Clínica Médica › Cardiologia › <span class="QuietDeck-sc-demo">Síncope</span></p>
+        </header>
+        <div class="ContentText-sc-demo">
+          <div data-highlightable="true" class="ContentContainer-sc-demo">
+            <p>
+              <strong>Clínica Médica.</strong>
+              <span class="cloze-answer">Síncope</span> é uma síndrome clínica caracterizada por perda
+              transitória da consciência com recuperação espontânea, completa e rápida.
+            </p>
+            <div class="osler-card-explanation">
+              <p><em>Resulta de uma hipoperfusão cerebral global e transitória.</em></p>
+              <p><em>É apenas uma das muitas causas de perda transitória da consciência.</em></p>
+            </div>
+          </div>
+        </div>
+        <div class="ReferenceText-sc-demo flashcard-reference">Syncope in adults, em <strong>UpToDate</strong>.</div>
+      </article>
+
+      <article>
+        <header>
+          <p class="QuietLine-sc-demo">Clínica Médica › Cardiologia › <span class="QuietDeck-sc-demo">Síncope</span></p>
+        </header>
+        <div class="ContentText-sc-demo">
+          <div data-highlightable="true" class="ContentContainer-sc-demo">
+            <p><strong>Síncope.</strong> É sinônimo de <u>perda transitória da consciência</u>?</p>
+          </div>
+        </div>
+        <div class="AnswerSection-sc-demo">
+          <div class="AnswerText-sc-demo">
+            <div data-highlightable="true" class="ContentContainer-sc-demo">
+              <p><strong>Não.</strong></p>
+              <div class="osler-card-explanation">
+                <p><em>Crises epilépticas, traumatismo cranioencefálico e intoxicações também causam perda de consciência.</em></p>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="ReferenceText-sc-demo flashcard-reference">Syncope in adults, em <strong>UpToDate</strong>.</div>
+      </article>
+
+      <article>
+        <header>
+          <p class="QuietLine-sc-demo">Clínica Médica › Cardiologia › <span class="QuietDeck-sc-demo">Síncope</span></p>
+        </header>
+        <div class="ContentText-sc-demo">
+          <div data-highlightable="true" class="ContentContainer-sc-demo">
+            <p><strong>Síncope.</strong> Apresenta um pico bimodal, sendo mais comum em:</p>
+            <ul>
+              <li><span class="cloze-answer">Adultos jovens</span>, e</li>
+              <li>Idosos.</li>
+            </ul>
+            <div class="osler-card-explanation">
+              <p><em>O primeiro pico ocorre no fim da adolescência, geralmente de origem vasovagal.</em></p>
+              <img src="https://placehold.co/600x180/png?text=Grafico+de+incidencia" alt="Gráfico de incidência" />
+            </div>
+          </div>
+        </div>
+        <div class="ReferenceText-sc-demo flashcard-reference">Syncope in adults, em <strong>UpToDate</strong>.</div>
+      </article>
+    </div>
+
+    <script src="../userscript/osler-anki-bridge.user.js"></script>
   </body>
 </html>

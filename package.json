@@ -1,11 +1,11 @@
 {
   "name": "osler-anki-bridge",
-  "version": "0.3.4",
+  "version": "0.4.0",
   "private": true,
-  "description": "Phase 1 automatic capture diagnostics for Osler pages.",
+  "description": "Captura todos os flashcards da pagina de consulta do Osler e exporta TSV pronto para o Anki.",
   "scripts": {
     "test": "node --test",
-    "lint": "node --check userscript/osler-anki-bridge.user.js && node --check docs/osler-anki-bridge.user.js && node --check tests/osler-anki-bridge.test.js"
+    "lint": "node --check userscript/osler-anki-bridge.user.js && node --check docs/osler-anki-bridge.user.js && node --check tests/osler-anki-bridge.test.js && node --check tests/helpers/mini-dom.js"
   },
   "engines": {
     "node": ">=20"

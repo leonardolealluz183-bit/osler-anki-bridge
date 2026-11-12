@@ -1,34 +1,46 @@
 # Osler Anki Bridge
 
-Fase 1 Android-only para capturar e diagnosticar cards da Osler por meio de userscript, sem envio de dados e sem integração com AnkiDroid ou aplicativo Android.
+Userscript para Firefox (Violentmonkey) que lê a **página de consulta** do Osler — onde os flashcards já aparecem abertos — e exporta tudo como **TSV pronto para importar no Anki**. Sem rede, sem backend e sem envio de dados.
 
-## Versão 0.3.4
+## Versão 0.4.0
 
-A extração na página real da Osler é automática:
+A captura agora é feita por card (`<article>`), e não mais por clique em **Errei/Difícil**:
 
-- localiza a pergunta a partir de `div.osler-card-explanation`;
-- extrai o assunto do primeiro `<strong>` da pergunta;
-- substitui respostas reveladas `.cloze-answer` por `[...]` na versão da pergunta;
-- preserva também a pergunta revelada;
-- captura um ou vários clozes como resposta;
-- em cards sem cloze, captura o bloco de resposta existente entre a pergunta e a explicação, incluindo listas;
-- captura todos os parágrafos da explicação;
-- detecta **Errei** e **Difícil** pelo rótulo e, como fallback, pela posição real dos botões SRS dentro do `ButtonsContainer` da Osler;
-- escuta `touchstart`, `pointerdown` e `click` para capturar antes da troca do card;
-- ignora **Acertei**;
-- remove `token`, `access_token`, assinatura e parâmetros equivalentes das URLs presentes no HTML copiado.
+- percorre **todos** os cards renderizados na consulta, um a um;
+- usa o breadcrumb do card (`Clínica Médica › Cardiologia › Síncope`) para montar deck e tags;
+- entende os dois formatos da Osler:
+  - **cloze**: lacunas `.cloze-answer` na pergunta;
+  - **pergunta/resposta**: pergunta no topo e resposta dentro de `AnswerSection`;
+- preserva listas, imagens, negrito, itálico e sublinhado;
+- remove as marcas d'água (`osler-wm` / `osler-fm`) e caracteres de largura zero;
+- converte os clozes para `{{c1::...}}`, `{{c2::...}}` no TSV de cloze;
+- gera também um TSV "básico" (frente/verso) com a resposta e a explicação no verso;
+- inclui imagens com URL absoluta (o token do Osler é mantido no TSV, mas removido do JSON de diagnóstico);
+- **Carregar tudo e capturar**: rola a lista até o fim para buscar os cards que ainda não foram renderizados (a consulta carrega em blocos; o topo pode dizer "50 de 50" com só 30 no DOM);
+- **Capturar só a tela**: substitui a captura pelo que está visível agora (não acumula lixo de telas anteriores);
+- o painel flutuante sobrevive às re-renderizações do SPA.
 
-A calibração manual permanece disponível somente como fallback de diagnóstico.
+## Como usar
+
+1. Abra a página de **consulta** do Osler com os flashcards abertos.
+2. Clique em **Carregar tudo e capturar** (canto inferior direito).
+3. Escolha o formato:
+   - **Baixar TSV cloze** se você usa o note type **Cloze** no Anki;
+   - **Baixar TSV básico** se quer frente/verso no note type **Basic**.
+4. No Anki: **Arquivo → Importar** e selecione o `.tsv`.
+   - O arquivo já traz `#separator:Tab`, `#html:true`, `#notetype`, `#tags column:3` e `#deck column:4`.
+   - Requer Anki 2.1.55 ou mais recente (cabeçalhos de arquivo).
+5. Opcional: **Copiar TSV** para colar direto na janela de importação.
 
 ## Conteúdo do repositório
 
 - `userscript/osler-anki-bridge.user.js`: código-fonte do userscript.
 - `docs/osler-anki-bridge.user.js`: cópia publicada pelo GitHub Pages.
-- `docs/index.html`: página simulada da estrutura real da Osler.
-- `tests/osler-anki-bridge.test.js`: testes automatizados da extração.
-- `docs/android-only.md`: instruções e limites da Fase 1.
+- `docs/index.html`: exemplo da estrutura real da Osler (sem login).
+- `tests/osler-anki-bridge.test.js`: testes de extração e exportação.
+- `tests/helpers/mini-dom.js`: mini-DOM usado pelos testes (sem dependências).
 
-O GitHub Pages deve ser configurado para publicar diretamente da branch `main`, pasta `/docs`.
+O GitHub Pages publica da branch `main`, pasta `/docs`.
 
 ## Desenvolvimento
 
@@ -37,6 +49,8 @@ npm test
 npm run lint
 ```
 
-## Fora do escopo
+## Limitações conhecidas
 
-Este repositório ainda não implementa Fase 2, Android Intent, envio direto ao AnkiDroid, backend, sincronização em nuvem nem aplicativo Android nativo.
+- A página de consulta carrega os cards em blocos. Se você usar **Capturar só a tela**, só entra o que está no DOM naquele momento.
+- Os tokens das imagens expiram (cerca de 14 dias). Importe o TSV enquanto a página estiver aberta para que o Anki baixe as imagens.
+- O userscript não envia nada para fora e não conversa com o AnkiDroid.

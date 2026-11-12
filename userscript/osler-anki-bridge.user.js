@@ -1,39 +1,33 @@
 // ==UserScript==
-// @name         Osler Capture Diagnostics
+// @name         Osler -> Anki Bridge
 // @namespace    https://github.com/osler-anki-bridge/osler-anki-bridge
-// @version      0.3.4
-// @description  Phase 1 automatic capture diagnostics for Osler cards. No network, AnkiDroid, or app integration.
+// @version      0.4.0
+// @description  Captura todos os flashcards da pagina de consulta do Osler e exporta TSV pronto para o Anki. Sem rede e sem envio externo.
 // @match        https://oslermedicina.com.br/*
 // @match        https://*.oslermedicina.com.br/*
 // @updateURL    https://leonardolealluz183-bit.github.io/osler-anki-bridge/osler-anki-bridge.user.js
 // @downloadURL  https://leonardolealluz183-bit.github.io/osler-anki-bridge/osler-anki-bridge.user.js
 // @grant        none
 // @run-at       document-idle
+// @noframes
 // ==/UserScript==
 
 (function bootstrap(global) {
   'use strict';
 
-  const STORAGE_KEY = 'oslerCaptureDiagnostics.config.v2';
-  const FIELD_LABELS = {
-    question: 'pergunta',
-    answer: 'resposta',
-    explanation: 'explicação',
-    deck: 'assunto/deck',
-  };
-  const FIELD_ORDER = Object.keys(FIELD_LABELS);
+  const PANEL_ID = 'osler-anki-bridge';
+  const ZERO_WIDTH = /[\u200B-\u200D\uFEFF]/g;
   const DANGEROUS_ATTR = /^(on|srcdoc$)/i;
-  const URL_ATTR = /^(href|src|xlink:href|formaction)$/i;
   const DANGEROUS_URL = /^\s*(javascript|data):/i;
   const SENSITIVE_QUERY_PARAM = /^(token|access_token|auth|authorization|signature|sig|key|jwt)$/i;
+  const SAFE_ATTRS = new Set(['href', 'src', 'alt', 'colspan', 'rowspan', 'start']);
+  const DROP_SELECTOR = 'script,style,iframe,object,embed,svg,canvas,button,noscript,link,.osler-wm,.osler-fm,.expand-button';
+  const NOISE_SELECTOR = '.osler-card-explanation,.flashcard-reference,button,.expand-button,.osler-wm,.osler-fm';
 
-  let calibrationField = null;
   let capturedCards = [];
-  let logs = [];
-  let config = {};
   let panelRefs = null;
-  let documentListenersInstalled = false;
-  let lastGesture = { trigger: '', at: 0 };
+  let panelKeeperInstalled = false;
+  let lastStatus = '';
 
   function now() {
     return new Date().toISOString();
@@ -43,40 +37,8 @@
     return String(value || '').replace(/\s+/g, ' ').trim();
   }
 
-  function normalizeButtonText(value) {
-    return normalizeWhitespace(value)
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .toLowerCase();
-  }
-
-  function log(message, details = {}) {
-    const entry = { at: now(), message, details };
-    logs.push(entry);
-    if (logs.length > 200) logs = logs.slice(-200);
-    renderPanel();
-    return entry;
-  }
-
-  function loadConfig(storage = global.localStorage) {
-    try {
-      return JSON.parse(storage?.getItem(STORAGE_KEY) || '{}');
-    } catch (_error) {
-      return {};
-    }
-  }
-
-  function saveConfig(nextConfig = config, storage = global.localStorage) {
-    config = { ...nextConfig };
-    storage?.setItem(STORAGE_KEY, JSON.stringify(config));
-    renderPanel();
-  }
-
-  function clearCalibration(storage = global.localStorage) {
-    config = {};
-    storage?.removeItem?.(STORAGE_KEY);
-    renderPanel();
-    log('calibração limpa');
+  function cleanText(value) {
+    return normalizeWhitespace(String(value || '').replace(ZERO_WIDTH, ''));
   }
 
   function cssEscape(value) {
@@ -84,37 +46,12 @@
     return String(value).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
   }
 
-  function selectorFor(element) {
-    if (!element?.tagName) return '';
-    if (element.id) return `#${cssEscape(element.id)}`;
-    const dataKey = Array.from(element.attributes || []).find((attr) => attr.name.startsWith('data-') && attr.value);
-    if (dataKey) return `${element.tagName.toLowerCase()}[${dataKey.name}="${cssEscape(dataKey.value)}"]`;
-
-    const parts = [];
-    let current = element;
-    while (current?.tagName && current.nodeType === 1 && parts.length < 5) {
-      let part = current.tagName.toLowerCase();
-      const stableClasses = Array.from(current.classList || [])
-        .filter((name) => !/^[a-zA-Z]+-[a-zA-Z]+$/.test(name))
-        .slice(0, 2);
-      if (stableClasses.length) part += `.${stableClasses.map(cssEscape).join('.')}`;
-      const parent = current.parentElement;
-      if (parent) {
-        const siblings = Array.from(parent.children || []).filter((child) => child.tagName === current.tagName);
-        if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(current) + 1})`;
-      }
-      parts.unshift(part);
-      current = parent;
-    }
-    return parts.join(' > ');
-  }
-
   function scrubSensitiveUrl(value) {
     const original = String(value || '').trim();
     if (!original || DANGEROUS_URL.test(original)) return '';
 
     try {
-      const base = global.location?.origin || 'https://oslermedicina.com.br';
+      const base = global.location?.href || 'https://oslermedicina.com.br';
       const parsed = new URL(original, base);
       Array.from(parsed.searchParams.keys()).forEach((key) => {
         if (SENSITIVE_QUERY_PARAM.test(key)) parsed.searchParams.delete(key);
@@ -130,208 +67,62 @@
     }
   }
 
-  function sanitizeHtml(html, documentRef = global.document) {
-    const template = documentRef?.createElement?.('template');
-    if (!template) return String(html || '').trim();
-    template.innerHTML = html || '';
-
-    if (!template.content?.querySelectorAll) {
-      return String(html || '')
-        .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
-        .replace(/\s+on[a-z]+=(("[^"]*")|('[^']*')|[^\s>]+)/gi, '')
-        .replace(/\s+(href|src|xlink:href|formaction)=(("|')?\s*(javascript|data):[^\s>]*(\3)?)/gi, '')
-        .replace(/([?&])(token|access_token|auth|authorization|signature|sig|key|jwt)=[^&"'\s>]*/gi, '$1')
-        .replace(/[?&]+(?=["'\s>])/g, '')
-        .trim();
+  function absolutizeUrl(value) {
+    const original = String(value || '').trim();
+    if (!original || DANGEROUS_URL.test(original)) return '';
+    try {
+      return new URL(original, global.location?.href || 'https://oslermedicina.com.br').href;
+    } catch (_error) {
+      return original;
     }
+  }
 
-    template.content.querySelectorAll('script, iframe, object, embed, link[rel="import"]').forEach((node) => node.remove());
+  function finalizeHtml(html) {
+    return String(html || '')
+      .replace(/[\u200B-\u200D\uFEFF]/g, '')
+      .replace(/<!--[\s\S]*?-->/g, '')
+      .trim();
+  }
+
+  function fallbackSanitize(html, { scrubUrls = false } = {}) {
+    return finalizeHtml(String(html || '')
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '')
+      .replace(/\s+on[a-z]+=(("[^"]*")|('[^']*')|[^\s>]+)/gi, '')
+      .replace(/\s+(?:class|data-[\w-]+|aria-[\w-]+|id|style)=("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+      .replace(/\s+(href|src|xlink:href|formaction)=("?)\s*(javascript|data):[^\s>]*\2/gi, '')
+      .replace(scrubUrls ? /([?&])(token|access_token|auth|authorization|signature|sig|key|jwt)=[^&"'\s>]*/gi : /$^/g, '$1')
+      .replace(scrubUrls ? /[?&]+(?=["'\s>])/g : /$^/g, ''));
+  }
+
+  function sanitizeHtml(html, documentRef = global.document, options = {}) {
+    const { scrubUrls = false, absolutize = false } = options;
+    const raw = String(html || '');
+    const template = documentRef?.createElement?.('template');
+    if (!template || !template.content?.querySelectorAll) return fallbackSanitize(raw, { scrubUrls });
+
+    template.innerHTML = raw;
+    template.content.querySelectorAll(DROP_SELECTOR).forEach((node) => node.remove());
     template.content.querySelectorAll('*').forEach((node) => {
-      Array.from(node.attributes).forEach((attr) => {
-        if (DANGEROUS_ATTR.test(attr.name)) {
+      Array.from(node.attributes || []).forEach((attr) => {
+        const name = String(attr.name || '').toLowerCase();
+        if (!SAFE_ATTRS.has(name) || DANGEROUS_ATTR.test(name)) {
           node.removeAttribute(attr.name);
           return;
         }
-        if (!URL_ATTR.test(attr.name)) return;
-        const sanitized = scrubSensitiveUrl(attr.value);
-        if (!sanitized) node.removeAttribute(attr.name);
-        else node.setAttribute(attr.name, sanitized);
+        if (name !== 'href' && name !== 'src') return;
+        let value = attr.value;
+        if (absolutize) value = absolutizeUrl(value);
+        if (scrubUrls) value = scrubSensitiveUrl(value);
+        if (!value) node.removeAttribute(attr.name);
+        else node.setAttribute(attr.name, value);
       });
     });
-    return template.innerHTML.trim();
-  }
-
-  function readElement(element, selector = '', documentRef = global.document) {
-    if (!element) return { selector, text: '', html: '' };
-    return {
-      selector,
-      text: normalizeWhitespace(element.textContent),
-      html: sanitizeHtml(element.innerHTML, documentRef),
-    };
-  }
-
-  function readField(selector, documentRef = global.document) {
-    const element = selector ? documentRef.querySelector(selector) : null;
-    return readElement(element, selector, documentRef);
+    return finalizeHtml(template.innerHTML);
   }
 
   function stripTopicPunctuation(value) {
     return normalizeWhitespace(value).replace(/[\s.:;,!?–—-]+$/u, '');
-  }
-
-  function findQuestionElement(explanationElement) {
-    if (!explanationElement) return null;
-
-    let fallback = null;
-    let sibling = explanationElement.previousElementSibling;
-    while (sibling) {
-      if (String(sibling.tagName || '').toLowerCase() === 'p') {
-        if (!fallback) fallback = sibling;
-        if (sibling.querySelector?.('strong')) return sibling;
-      }
-      sibling = sibling.previousElementSibling;
-    }
-    if (fallback) return fallback;
-
-    const parent = explanationElement.parentElement;
-    if (!parent) return null;
-    const children = Array.from(parent.children || []);
-    const explanationIndex = children.indexOf(explanationElement);
-    for (let index = explanationIndex - 1; index >= 0; index -= 1) {
-      const candidate = children[index];
-      if (String(candidate?.tagName || '').toLowerCase() !== 'p') continue;
-      if (!fallback) fallback = candidate;
-      if (candidate.querySelector?.('strong')) return candidate;
-    }
-    return fallback;
-  }
-
-  function replaceClozesWithPlaceholders(questionElement) {
-    const clone = questionElement?.cloneNode?.(true);
-    if (!clone) return null;
-    Array.from(clone.querySelectorAll?.('.cloze-answer') || []).forEach((node) => {
-      if (typeof node.replaceWith === 'function') {
-        node.replaceWith(global.document?.createTextNode?.('[...]') || '[...]');
-      } else {
-        node.textContent = '[...]';
-        node.innerHTML = '[...]';
-      }
-    });
-    return clone;
-  }
-
-  function extractAnswers(questionElement, documentRef = global.document) {
-    const items = Array.from(questionElement?.querySelectorAll?.('.cloze-answer') || []).map((element) => ({
-      text: normalizeWhitespace(element.textContent),
-      html: sanitizeHtml(element.innerHTML, documentRef),
-    }));
-    return {
-      selector: '.cloze-answer',
-      source: 'cloze',
-      text: items.map((item) => item.text).filter(Boolean).join('; '),
-      html: items.map((item) => item.html).filter(Boolean).join('; '),
-      items,
-    };
-  }
-
-  function elementsBetween(questionElement, explanationElement) {
-    const parent = questionElement?.parentElement;
-    if (!parent || parent !== explanationElement?.parentElement) return [];
-    const children = Array.from(parent.children || []);
-    const questionIndex = children.indexOf(questionElement);
-    const explanationIndex = children.indexOf(explanationElement);
-    if (questionIndex < 0 || explanationIndex <= questionIndex) return [];
-    return children.slice(questionIndex + 1, explanationIndex);
-  }
-
-  function extractIntermediateAnswer(questionElement, explanationElement, documentRef = global.document) {
-    const containers = elementsBetween(questionElement, explanationElement).filter((element) => {
-      const tag = String(element?.tagName || '').toLowerCase();
-      if (!element || ['script', 'style', 'button'].includes(tag)) return false;
-      return Boolean(normalizeWhitespace(element.textContent) || element.querySelector?.('img, svg'));
-    });
-
-    const itemElements = [];
-    containers.forEach((container) => {
-      const tag = String(container.tagName || '').toLowerCase();
-      const listItems = tag === 'li'
-        ? [container]
-        : Array.from(container.querySelectorAll?.('li') || []);
-      if (listItems.length) itemElements.push(...listItems);
-      else itemElements.push(container);
-    });
-
-    const items = itemElements
-      .map((element) => ({
-        text: normalizeWhitespace(element.textContent),
-        html: sanitizeHtml(element.innerHTML, documentRef),
-      }))
-      .filter((item) => item.text || item.html);
-
-    return {
-      selector: 'between(question, explanation)',
-      source: 'intermediate-block',
-      text: items.map((item) => item.text).filter(Boolean).join('\n'),
-      html: containers
-        .map((element) => sanitizeHtml(element.outerHTML || element.innerHTML, documentRef))
-        .filter(Boolean)
-        .join('\n'),
-      items,
-    };
-  }
-
-  function extractTopic(questionElement, documentRef = global.document) {
-    const element = questionElement?.querySelector?.('strong') || null;
-    if (!element) return { selector: 'strong', text: '', html: '' };
-    return {
-      selector: 'strong',
-      text: stripTopicPunctuation(element.textContent),
-      html: sanitizeHtml(element.innerHTML, documentRef),
-    };
-  }
-
-  function extractOslerCard(documentRef = global.document) {
-    const explanationElement = documentRef?.querySelector?.('div.osler-card-explanation');
-    const questionElement = findQuestionElement(explanationElement);
-    if (!explanationElement || !questionElement) return null;
-
-    const revealedQuestion = readElement(questionElement, selectorFor(questionElement), documentRef);
-    const placeholderQuestion = replaceClozesWithPlaceholders(questionElement);
-    const topic = extractTopic(questionElement, documentRef);
-    const clozeAnswer = extractAnswers(questionElement, documentRef);
-    const answer = clozeAnswer.items.length
-      ? clozeAnswer
-      : extractIntermediateAnswer(questionElement, explanationElement, documentRef);
-    const explanation = readElement(explanationElement, 'div.osler-card-explanation', documentRef);
-
-    return {
-      question: {
-        selector: revealedQuestion.selector,
-        text: normalizeWhitespace(placeholderQuestion?.textContent),
-        html: sanitizeHtml(placeholderQuestion?.innerHTML || '', documentRef),
-        revealedText: revealedQuestion.text,
-        revealedHtml: revealedQuestion.html,
-      },
-      answer,
-      explanation,
-      topic,
-      deck: { ...topic },
-    };
-  }
-
-  function extractFallbackCard(documentRef = global.document) {
-    const question = readField(config.question, documentRef);
-    return {
-      question: {
-        ...question,
-        revealedText: question.text,
-        revealedHtml: question.html,
-      },
-      answer: { ...readField(config.answer, documentRef), source: 'manual-fallback', items: [] },
-      explanation: readField(config.explanation, documentRef),
-      topic: readField(config.deck, documentRef),
-      deck: readField(config.deck, documentRef),
-    };
   }
 
   function stableHash(input) {
@@ -345,148 +136,368 @@
 
   function buildStableId(card) {
     return stableHash([
-      card.topic?.text || card.deck?.text || '',
-      card.question?.revealedText || card.question?.text || '',
+      card.deck?.text || '',
+      card.question?.text || '',
       card.answer?.text || '',
       card.explanation?.text || '',
     ].join('\n---\n'));
   }
 
-  function captureCard(trigger, documentRef = global.document) {
-    const extracted = extractOslerCard(documentRef) || extractFallbackCard(documentRef);
+  function directChildContaining(root, node) {
+    let current = node;
+    while (current && current.parentNode && current.parentNode !== root) {
+      current = current.parentNode;
+    }
+    return current && current.parentNode === root ? current : null;
+  }
+
+  function replaceClozes(root, makeToken) {
+    const nodes = Array.from(root?.querySelectorAll?.('.cloze-answer') || []);
+    nodes.forEach((node, index) => {
+      const token = makeToken(index, cleanText(node.textContent));
+      const documentRef = node.ownerDocument || global.document;
+      const textNode = documentRef?.createTextNode?.(token);
+      if (textNode && typeof node.replaceWith === 'function') {
+        node.replaceWith(textNode);
+      } else {
+        node.textContent = token;
+      }
+    });
+    return nodes.length;
+  }
+
+  function splitAfterLastCloze(root) {
+    const clozes = Array.from(root?.querySelectorAll?.('.cloze-answer') || []);
+    if (!clozes.length) return '';
+    const direct = directChildContaining(root, clozes[clozes.length - 1]);
+    if (!direct) return '';
+
+    const tail = root.cloneNode(false);
+    let node = direct.nextSibling;
+    while (node) {
+      const next = node.nextSibling;
+      tail.appendChild(node);
+      node = next;
+    }
+    return tail.innerHTML;
+  }
+
+  function removeNoise(root) {
+    Array.from(root?.querySelectorAll?.(NOISE_SELECTOR) || []).forEach((node) => node.remove());
+    return root;
+  }
+
+  function isVisible(element) {
+    if (typeof element?.getClientRects === 'function') {
+      return element.getClientRects().length > 0;
+    }
+    return true;
+  }
+
+  function collectArticleElements(documentRef = global.document) {
+    const all = Array.from(documentRef?.querySelectorAll?.('article') || []);
+    return all.filter((article) => {
+      if (!article?.querySelector) return false;
+      const hasContent = article.querySelector('[class*="ContentContainer"], [data-highlightable]');
+      if (!hasContent) return false;
+      return isVisible(article);
+    });
+  }
+
+  function readDeckPath(article) {
+    const line = article?.querySelector?.('[class*="QuietLine"]');
+    const text = cleanText(line?.textContent);
+    if (text) {
+      return text.split('›').map((part) => normalizeWhitespace(part)).filter(Boolean);
+    }
+    const deck = cleanText(article?.querySelector?.('[class*="QuietDeck"]')?.textContent);
+    return deck ? [deck] : [];
+  }
+
+  function toTagPart(value) {
+    return cleanText(value)
+      .replace(/\s+/g, '_')
+      .replace(/[^\p{L}\p{N}_-]/gu, '');
+  }
+
+  function extractArticle(article, documentRef = global.document) {
+    const questionRoot = article?.querySelector?.('[class*="ContentText"] [class*="ContentContainer"]')
+      || article?.querySelector?.('[data-highlightable]');
+    if (!questionRoot) return null;
+
+    const answerRoot = article.querySelector('[class*="AnswerSection"] [class*="ContentContainer"]');
+    const explanationElements = Array.from(article.querySelectorAll('.osler-card-explanation'));
+    const referenceElement = article.querySelector('.flashcard-reference');
+
+    const questionClone = removeNoise(questionRoot.cloneNode(true));
+    const clozeElements = Array.from(questionClone.querySelectorAll('.cloze-answer'));
+    const clozeTexts = clozeElements.map((element) => cleanText(element.textContent));
+    const tailHtml = sanitizeHtml(splitAfterLastCloze(questionClone), documentRef, { absolutize: true });
+
+    const placeholderClone = questionClone.cloneNode(true);
+    replaceClozes(placeholderClone, () => '[...]');
+
+    const clozeClone = questionClone.cloneNode(true);
+    replaceClozes(clozeClone, (index, text) => `{{c${index + 1}::${text}}}`);
+
+    const questionHtml = sanitizeHtml(placeholderClone.innerHTML, documentRef, { absolutize: true });
+    const questionClozeHtml = sanitizeHtml(clozeClone.innerHTML, documentRef, { absolutize: true });
+    const revealedHtml = sanitizeHtml(questionClone.innerHTML, documentRef, { absolutize: true });
+    const questionText = cleanText(placeholderClone.textContent);
+    const revealedText = cleanText(questionClone.textContent);
+
+    if (!questionText) return null;
+
+    let answerHtml = '';
+    let answerText = '';
+    if (answerRoot) {
+      const answerClone = removeNoise(answerRoot.cloneNode(true));
+      answerHtml = sanitizeHtml(answerClone.innerHTML, documentRef, { absolutize: true });
+      answerText = cleanText(answerClone.textContent);
+    }
+    if (!answerText && clozeTexts.length) {
+      answerText = clozeTexts.join('; ');
+      answerHtml = clozeTexts.map((text) => `<strong>${text}</strong>`).join(' · ');
+    }
+
+    const explanationHtml = sanitizeHtml(
+      explanationElements.map((element) => element.innerHTML).join('\n'),
+      documentRef,
+      { absolutize: true },
+    );
+    const explanationText = cleanText(explanationElements.map((element) => element.textContent).join('\n'));
+
+    const referenceHtml = referenceElement
+      ? sanitizeHtml(referenceElement.innerHTML, documentRef, { absolutize: true })
+      : '';
+    const referenceText = referenceElement ? cleanText(referenceElement.textContent) : '';
+
+    const deckPath = readDeckPath(article);
+    const deckName = ['Osler', ...deckPath].join('::');
+    const topic = stripTopicPunctuation(deckPath[deckPath.length - 1] || '');
+    const type = clozeTexts.length ? 'cloze' : 'basic';
+
+    const backParts = [answerHtml, explanationHtml, referenceHtml].filter(Boolean).join('<br><br>');
+    const extraParts = [tailHtml, answerHtml && !clozeTexts.length ? answerHtml : '', explanationHtml, referenceHtml]
+      .filter(Boolean)
+      .join('<br><br>');
+
     const card = {
       id: '',
-      trigger,
+      type,
       capturedAt: now(),
       url: global.location?.href || '',
-      ...extracted,
+      deckPath,
+      deckName,
+      topic: { text: topic, html: topic },
+      deck: { text: deckName, html: deckName },
+      tags: ['osler', ...deckPath.map(toTagPart).filter(Boolean)],
+      question: {
+        text: questionText,
+        html: questionHtml,
+        clozeHtml: questionClozeHtml,
+        revealedText,
+        revealedHtml,
+      },
+      answer: {
+        text: answerText,
+        html: answerHtml,
+        source: clozeTexts.length ? 'cloze' : answerRoot ? 'answer-section' : 'none',
+        items: clozeTexts,
+      },
+      explanation: { text: explanationText, html: explanationHtml },
+      reference: { text: referenceText, html: referenceHtml },
+      tailHtml,
+      backHtml: backParts,
+      extraHtml: extraParts,
     };
     card.id = buildStableId(card);
-
-    if (!card.question?.text && !card.question?.revealedText) {
-      log('captura ignorada: pergunta não encontrada', { trigger });
-      return null;
-    }
-    if (capturedCards.some((existing) => existing.id === card.id)) {
-      log('captura duplicada ignorada', { id: card.id, trigger });
-      return null;
-    }
-
-    capturedCards.push(card);
-    log('card capturado', { id: card.id, trigger });
-    renderPanel();
     return card;
   }
 
-  function triggerForButton(element) {
-    const text = normalizeButtonText([
-      element?.textContent,
-      element?.innerText,
-      element?.getAttribute?.('aria-label'),
-      element?.getAttribute?.('title'),
-      element?.getAttribute?.('value'),
-    ].filter(Boolean).join(' '));
-    if (text.includes('acertei')) return null;
-    if (text.includes('errei')) return 'botão Errei';
-    if (text.includes('dificil')) return 'botão Difícil';
-    return null;
+  function extractCardsFromDocument(documentRef = global.document) {
+    return collectArticleElements(documentRef)
+      .map((article) => extractArticle(article, documentRef))
+      .filter(Boolean);
   }
 
-  function triggerFromOslerStructure(target) {
-    const button = target?.closest?.('button,[role="button"]') || null;
-    if (!button) return null;
-
-    if (button.matches?.('[data-osler-capture-bound="wrongButton"]')) return 'botão Errei';
-    if (button.matches?.('[data-osler-capture-bound="hardButton"]')) return 'botão Difícil';
-
-    const group = button.closest?.('[class*="ButtonsContainer"]');
-    if (!group?.querySelectorAll) return null;
-
-    const buttons = Array.from(group.querySelectorAll('button,[role="button"]')).filter((candidate) => {
-      const className = String(candidate.className || '');
-      return className.includes('SRSButton') || Boolean(candidate.closest?.('[class*="MetacognitionContainer"]'));
+  function captureFromDocument(documentRef = global.document) {
+    const cards = extractCardsFromDocument(documentRef);
+    const known = new Set(capturedCards.map((card) => card.id));
+    let added = 0;
+    cards.forEach((card) => {
+      if (known.has(card.id)) return;
+      known.add(card.id);
+      capturedCards.push(card);
+      added += 1;
     });
-    const index = buttons.indexOf(button);
-    if (index === 0) return 'botão Errei';
-    if (index === 1) return 'botão Difícil';
-    return null;
+    return added;
   }
 
-  function findActionElement(target) {
-    const closest = target?.closest?.('button,[role="button"]');
-    if (closest && (triggerForButton(closest) || triggerFromOslerStructure(closest))) return closest;
-
-    let current = target;
-    for (let depth = 0; current && depth < 8; depth += 1) {
-      if (triggerForButton(current) || triggerFromOslerStructure(current)) return current;
-      current = current.parentElement;
-    }
-    return null;
+  function capturePage(documentRef = global.document) {
+    capturedCards = [];
+    const added = captureFromDocument(documentRef);
+    renderPanel();
+    return added;
   }
 
-  function handleDocumentAction(event, documentRef = global.document) {
-    if (calibrationField) {
-      if (!event.target || panelRefs?.root?.contains?.(event.target)) return null;
-      if (event.type !== 'click') return null;
-      event.preventDefault?.();
-      event.stopPropagation?.();
-      finishCalibration(event.target, documentRef);
-      return 'calibration';
+  function resetCaptures() {
+    capturedCards = [];
+  }
+
+  function getCapturedCards() {
+    return capturedCards;
+  }
+
+  function readTotal(documentRef = global.document) {
+    const element = documentRef?.querySelector?.('[class*="ProgressText"]');
+    const text = cleanText(element?.textContent);
+    const match = text.match(/(\d+)\s*$/);
+    return match ? Number(match[1]) : 0;
+  }
+
+  function findScroller(documentRef = global.document) {
+    const candidates = [
+      documentRef?.querySelector?.('#main-content-scroll'),
+      documentRef?.querySelector?.('[class*="ConsultContent"]'),
+      documentRef?.querySelector?.('[class*="MainContent"]'),
+    ].filter(Boolean);
+    for (const element of candidates) {
+      if (Number(element.scrollHeight) > Number(element.clientHeight) + 20) return element;
     }
+    return documentRef?.scrollingElement || documentRef?.documentElement || null;
+  }
 
-    const path = event.composedPath?.() || [];
-    let actionElement = null;
-    let trigger = null;
-
-    for (const node of path) {
-      trigger = triggerForButton(node) || triggerFromOslerStructure(node);
-      if (trigger) {
-        actionElement = node;
-        break;
+  function scrollForward(documentRef = global.document) {
+    const scroller = findScroller(documentRef);
+    if (scroller) scroller.scrollTop = scroller.scrollHeight;
+    const view = documentRef?.defaultView;
+    if (view && typeof view.scrollTo === 'function') {
+      try {
+        view.scrollTo(0, documentRef.body?.scrollHeight || 0);
+      } catch (_error) {
+        /* ignore */
       }
     }
+    const endButton = documentRef?.querySelector?.('button[title="Ir para o final"]')
+      || documentRef?.querySelector?.('button[aria-label="Ir para o final"]');
+    endButton?.click?.();
+  }
 
-    if (!trigger) {
-      actionElement = findActionElement(event.target);
-      trigger = triggerForButton(actionElement) || triggerFromOslerStructure(actionElement);
+  function defaultWait(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  async function loadAllCards(options = {}) {
+    const documentRef = options.documentRef || global.document;
+    const wait = options.wait || defaultWait;
+    const maxMs = options.maxMs ?? 45000;
+    const quietRounds = options.quietRounds ?? 4;
+
+    capturedCards = [];
+    const total = readTotal(documentRef);
+    let lastCount = -1;
+    let stable = 0;
+    const deadline = Date.now() + maxMs;
+
+    while (Date.now() < deadline) {
+      captureFromDocument(documentRef);
+      setStatus(`Carregando... ${capturedCards.length}${total ? ` de ${total}` : ''} card(s)`);
+      if (total && capturedCards.length >= total) break;
+      scrollForward(documentRef);
+      await wait(400);
+      const count = capturedCards.length;
+      if (count === lastCount) stable += 1;
+      else {
+        stable = 0;
+        lastCount = count;
+      }
+      if (stable >= quietRounds) break;
     }
-    if (!trigger) return null;
 
-    const timestamp = Date.now();
-    if (lastGesture.trigger === trigger && timestamp - lastGesture.at < 1000) return null;
-    lastGesture = { trigger, at: timestamp };
-    return captureCard(trigger, documentRef);
+    captureFromDocument(documentRef);
+    renderPanel();
+    return {
+      captured: capturedCards.length,
+      total,
+    };
   }
 
-  function handleDocumentClick(event, documentRef = global.document) {
-    return handleDocumentAction(event, documentRef);
+  function toField(html) {
+    return String(html || '')
+      .replace(/\r?\n/g, '')
+      .replace(/\t/g, ' ')
+      .trim();
   }
 
-  function startCalibration(field) {
-    calibrationField = field;
-    log('calibração iniciada', { field });
+  function tsvHeader(noteType) {
+    return [
+      '#separator:Tab',
+      '#html:true',
+      `#notetype:${noteType}`,
+      '#tags column:3',
+      '#deck column:4',
+    ].join('\n');
   }
 
-  function finishCalibration(element, documentRef = global.document) {
-    if (!calibrationField || !element || panelRefs?.root?.contains?.(element)) return false;
-    const selector = selectorFor(element);
-    saveConfig({ ...config, [calibrationField]: selector });
-    log('calibração salva', { field: calibrationField, selector });
-    calibrationField = null;
-    return true;
+  function buildBasicTsv(cards = capturedCards) {
+    if (!cards.length) return '';
+    const rows = cards.map((card) => [
+      toField(card.question.html),
+      toField(card.backHtml),
+      card.tags.join(' '),
+      card.deckName,
+    ].join('\t'));
+    return `${tsvHeader('Basic')}\n${rows.join('\n')}\n`;
   }
 
-  function installDocumentListeners(documentRef = global.document) {
-    if (documentListenersInstalled || !documentRef?.addEventListener) return false;
-    documentRef.addEventListener('touchstart', (event) => handleDocumentAction(event, documentRef), true);
-    documentRef.addEventListener('pointerdown', (event) => handleDocumentAction(event, documentRef), true);
-    documentRef.addEventListener('click', (event) => handleDocumentAction(event, documentRef), true);
-    documentListenersInstalled = true;
-    return true;
+  function buildClozeTsv(cards = capturedCards) {
+    const clozeCards = cards.filter((card) => card.type === 'cloze');
+    if (!clozeCards.length) return '';
+    const rows = clozeCards.map((card) => [
+      toField(card.question.clozeHtml),
+      toField(card.extraHtml),
+      card.tags.join(' '),
+      card.deckName,
+    ].join('\t'));
+    return `${tsvHeader('Cloze')}\n${rows.join('\n')}\n`;
   }
 
-  function installDocumentListener(documentRef = global.document) {
-    return installDocumentListeners(documentRef);
+  function slugify(value) {
+    return cleanText(value)
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '') || 'osler';
+  }
+
+  function suggestFileName(cards = capturedCards) {
+    const deck = cards[0]?.deckPath?.[cards[0].deckPath.length - 1] || 'osler';
+    return `osler-${slugify(deck)}`;
+  }
+
+  function panelJson() {
+    const cards = capturedCards.map((card) => {
+      const copy = { ...card, tags: [...card.tags], deckPath: [...card.deckPath] };
+      ['question', 'answer', 'explanation', 'reference'].forEach((field) => {
+        if (!copy[field]?.html) return;
+        copy[field] = {
+          ...copy[field],
+          html: sanitizeHtml(copy[field].html, global.document, { scrubUrls: true }),
+        };
+      });
+      ['backHtml', 'extraHtml', 'tailHtml'].forEach((field) => {
+        if (copy[field]) copy[field] = sanitizeHtml(copy[field], global.document, { scrubUrls: true });
+      });
+      return copy;
+    });
+    return JSON.stringify({
+      version: '0.4.0',
+      url: global.location?.href || '',
+      total: cards.length,
+      cards,
+    }, null, 2);
   }
 
   function copyText(text) {
@@ -500,103 +511,218 @@
     return Promise.resolve();
   }
 
-  function panelJson() {
-    return JSON.stringify({ config, capturedCards }, null, 2);
+  function downloadText(filename, text, mime = 'text/tab-separated-values;charset=utf-8') {
+    const documentRef = global.document;
+    const blob = new global.Blob([text], { type: mime });
+    const url = global.URL.createObjectURL(blob);
+    const anchor = documentRef.createElement('a');
+    anchor.href = url;
+    anchor.download = filename;
+    documentRef.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => global.URL.revokeObjectURL(url), 1000);
   }
 
-  function logsJson() {
-    return JSON.stringify(logs, null, 2);
+  function setStatus(text) {
+    lastStatus = text;
+    if (panelRefs?.status) panelRefs.status.textContent = text;
   }
 
   function renderPanel() {
     if (!panelRefs) return;
-    panelRefs.output.textContent = panelJson();
-    panelRefs.status.textContent = calibrationField
-      ? `Toque no elemento de ${FIELD_LABELS[calibrationField]}`
-      : `${capturedCards.length} card(s) capturado(s) — extração automática ativa`;
+    const pageCount = Number(global.document?.querySelectorAll?.('article')?.length || 0);
+    const total = readTotal(global.document);
+    const clozeCount = capturedCards.filter((card) => card.type === 'cloze').length;
+    const basicCount = capturedCards.length - clozeCount;
+    const totalHint = total && capturedCards.length < total ? ` (a pagina mostra ${total}; use "Carregar tudo")` : '';
+
+    panelRefs.badge.textContent = String(capturedCards.length);
+    setStatus(`${capturedCards.length} capturado(s) · ${clozeCount} cloze · ${basicCount} basico · ${pageCount} artigo(s) no DOM${totalHint}`);
+
+    if (panelRefs.list) {
+      panelRefs.list.textContent = '';
+      capturedCards.slice(0, 300).forEach((card) => {
+        const item = global.document.createElement('li');
+        item.textContent = `${card.type === 'cloze' ? '[cloze]' : '[basico]'} ${card.question.text.slice(0, 110)}`;
+        panelRefs.list.appendChild(item);
+      });
+      if (capturedCards.length > 300) {
+        const item = global.document.createElement('li');
+        item.textContent = `... e mais ${capturedCards.length - 300}`;
+        panelRefs.list.appendChild(item);
+      }
+    }
+    if (panelRefs.output) panelRefs.output.textContent = lastStatus;
+  }
+
+  function buttonStyle(element) {
+    element.style.cssText = 'appearance:none;border:1px solid #3b4459;background:#232a3a;color:#e9edf7;border-radius:8px;padding:6px 9px;font:12px system-ui,sans-serif;cursor:pointer';
+    return element;
+  }
+
+  function makeButton(documentRef, label, action) {
+    const button = buttonStyle(documentRef.createElement('button'));
+    button.type = 'button';
+    button.textContent = label;
+    button.dataset.action = action;
+    return button;
   }
 
   function createPanel(documentRef = global.document) {
     const root = documentRef.createElement('section');
-    root.id = 'osler-capture-diagnostics';
+    root.id = PANEL_ID;
     root.innerHTML = `
-      <strong>Osler Capture Diagnostics — Fase 1</strong>
-      <p data-role="status"></p>
-      <details>
-        <summary>Calibração manual (fallback)</summary>
-        <div data-role="calibration"></div>
-        <button type="button" data-action="clear-calibration">Limpar calibração</button>
+      <details open>
+        <summary style="cursor:pointer;font:600 13px system-ui,sans-serif">
+          Osler -> Anki <span data-role="badge" style="background:#2f6feb;color:#fff;border-radius:999px;padding:0 7px;font-size:11px">0</span>
+        </summary>
+        <p data-role="status" style="margin:8px 0;font-size:11px;line-height:1.4;color:#c7ceda"></p>
+        <div data-role="actions" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"></div>
+        <p data-role="output" style="margin:0;font:11px ui-monospace,monospace;color:#9fb0c7;word-break:break-word"></p>
+        <details style="margin-top:8px">
+          <summary style="cursor:pointer;font-size:11px;color:#c7ceda">Cards capturados</summary>
+          <ol data-role="list" style="margin:6px 0 0 16px;padding:0;font-size:11px;line-height:1.45;max-height:220px;overflow:auto"></ol>
+        </details>
       </details>
-      <button type="button" data-action="copy-json">Copiar JSON</button>
-      <button type="button" data-action="copy-logs">Copiar logs</button>
-      <pre data-role="output"></pre>
     `;
-    root.style.cssText = 'position:fixed;right:12px;bottom:12px;z-index:2147483647;max-width:420px;max-height:70vh;overflow:auto;background:#fff;color:#111;border:1px solid #999;border-radius:12px;padding:12px;font:12px system-ui,sans-serif;box-shadow:0 6px 20px rgba(0,0,0,.25)';
+    root.style.cssText = 'position:fixed;right:12px;bottom:12px;z-index:2147483647;width:min(380px,calc(100vw - 24px));max-height:72vh;overflow:auto;background:#161b26;color:#e9edf7;border:1px solid #3b4459;border-radius:12px;padding:10px 12px;box-shadow:0 8px 28px rgba(0,0,0,.45);font:12px system-ui,sans-serif';
 
-    const calibration = root.querySelector('[data-role="calibration"]');
-    FIELD_ORDER.forEach((field) => {
-      const button = documentRef.createElement('button');
-      button.type = 'button';
-      button.textContent = `Calibrar ${FIELD_LABELS[field]}`;
-      button.addEventListener('click', () => startCalibration(field));
-      calibration.appendChild(button);
+    const actions = root.querySelector('[data-role="actions"]');
+    const primary = makeButton(documentRef, 'Carregar tudo e capturar', 'load-all');
+    primary.style.background = '#2f6feb';
+    primary.style.borderColor = '#2f6feb';
+    actions.appendChild(primary);
+    actions.appendChild(makeButton(documentRef, 'Capturar so a tela', 'capture'));
+    actions.appendChild(makeButton(documentRef, 'Copiar TSV basico', 'copy-basic'));
+    actions.appendChild(makeButton(documentRef, 'Copiar TSV cloze', 'copy-cloze'));
+    actions.appendChild(makeButton(documentRef, 'Baixar TSV basico', 'download-basic'));
+    actions.appendChild(makeButton(documentRef, 'Baixar TSV cloze', 'download-cloze'));
+    actions.appendChild(makeButton(documentRef, 'Baixar JSON', 'download-json'));
+    actions.appendChild(makeButton(documentRef, 'Limpar', 'clear'));
+
+    actions.addEventListener('click', async (event) => {
+      const action = event.target?.closest?.('button')?.dataset?.action;
+      if (!action) return;
+      event.preventDefault();
+      event.stopPropagation();
+
+      if (action === 'load-all') {
+        setStatus('Carregando todos os cards...');
+        const result = await loadAllCards();
+        setStatus(`Pronto: ${result.captured}${result.total ? ` de ${result.total}` : ''} card(s)`);
+        return;
+      }
+      if (action === 'capture') {
+        const added = capturePage();
+        setStatus(`${added} card(s) capturado(s) na tela atual`);
+        return;
+      }
+      if (action === 'copy-basic') {
+        const tsv = buildBasicTsv();
+        if (!tsv) return setStatus('Nada capturado ainda');
+        await copyText(tsv);
+        return setStatus(`${capturedCards.length} card(s) copiados (basico)`);
+      }
+      if (action === 'copy-cloze') {
+        const tsv = buildClozeTsv();
+        if (!tsv) return setStatus('Nenhum card cloze capturado');
+        await copyText(tsv);
+        return setStatus(`${tsv.split('\n').length - 6} card(s) cloze copiados`);
+      }
+      if (action === 'download-basic') {
+        const tsv = buildBasicTsv();
+        if (!tsv) return setStatus('Nada capturado ainda');
+        downloadText(`${suggestFileName()}-basico.tsv`, tsv);
+        return setStatus('TSV basico baixado');
+      }
+      if (action === 'download-cloze') {
+        const tsv = buildClozeTsv();
+        if (!tsv) return setStatus('Nenhum card cloze capturado');
+        downloadText(`${suggestFileName()}-cloze.tsv`, tsv);
+        return setStatus('TSV cloze baixado');
+      }
+      if (action === 'download-json') {
+        downloadText(`${suggestFileName()}.json`, panelJson(), 'application/json;charset=utf-8');
+        return setStatus('JSON baixado');
+      }
+      if (action === 'clear') {
+        capturedCards = [];
+        renderPanel();
+        return setStatus('Capturas limpas');
+      }
+      return null;
     });
-    root.querySelector('[data-action="clear-calibration"]').addEventListener('click', () => clearCalibration());
-    root.querySelector('[data-action="copy-json"]').addEventListener('click', () => copyText(panelJson()).then(() => log('JSON copiado')));
-    root.querySelector('[data-action="copy-logs"]').addEventListener('click', () => copyText(logsJson()).then(() => log('logs copiados')));
+
     return root;
   }
 
+  function installPanelKeeper(documentRef = global.document) {
+    if (panelKeeperInstalled || !documentRef?.body) return;
+    if (typeof global.MutationObserver !== 'function') return;
+    const observer = new global.MutationObserver(() => {
+      if (!panelRefs?.root) return;
+      if (documentRef.body.contains(panelRefs.root)) return;
+      documentRef.body.appendChild(panelRefs.root);
+    });
+    observer.observe(documentRef.body, { childList: true });
+    panelKeeperInstalled = true;
+  }
+
   function install(documentRef = global.document) {
-    if (!documentRef?.body || documentRef.getElementById('osler-capture-diagnostics')) return null;
-    config = loadConfig();
+    if (!documentRef?.body) return null;
+    if (documentRef.getElementById?.(PANEL_ID)) return null;
+
     const root = createPanel(documentRef);
     documentRef.body.appendChild(root);
     panelRefs = {
       root,
-      output: root.querySelector('[data-role="output"]'),
+      badge: root.querySelector('[data-role="badge"]'),
       status: root.querySelector('[data-role="status"]'),
+      output: root.querySelector('[data-role="output"]'),
+      list: root.querySelector('[data-role="list"]'),
     };
-    installDocumentListeners(documentRef);
+    installPanelKeeper(documentRef);
     renderPanel();
-    log('userscript instalado: extração automática ativa, sem integrações externas');
     return root;
   }
 
   const api = {
+    buildBasicTsv,
+    buildClozeTsv,
     buildStableId,
-    captureCard,
-    clearCalibration,
+    captureFromDocument,
+    capturePage,
+    cleanText,
+    collectArticleElements,
     createPanel,
-    elementsBetween,
-    extractAnswers,
-    extractIntermediateAnswer,
-    extractOslerCard,
-    extractTopic,
-    findActionElement,
-    findQuestionElement,
-    finishCalibration,
-    handleDocumentAction,
-    handleDocumentClick,
+    directChildContaining,
+    downloadText,
+    extractArticle,
+    extractCardsFromDocument,
+    findScroller,
+    getCapturedCards,
     install,
-    installDocumentListener,
-    installDocumentListeners,
-    loadConfig,
-    logsJson,
-    normalizeButtonText,
+    isVisible,
+    loadAllCards,
+    normalizeWhitespace,
     panelJson,
-    readField,
-    replaceClozesWithPlaceholders,
+    readDeckPath,
+    readTotal,
+    removeNoise,
+    renderPanel,
+    replaceClozes,
+    resetCaptures,
     sanitizeHtml,
-    saveConfig,
+    scrollForward,
     scrubSensitiveUrl,
-    selectorFor,
+    splitAfterLastCloze,
     stableHash,
-    startCalibration,
     stripTopicPunctuation,
-    triggerForButton,
-    triggerFromOslerStructure,
+    suggestFileName,
+    toField,
   };
+  global.OslerAnkiBridge = api;
   global.OslerCaptureDiagnostics = api;
 
   if (typeof module !== 'undefined' && module.exports) {
